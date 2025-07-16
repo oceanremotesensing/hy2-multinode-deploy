@@ -61,8 +61,10 @@ for i in {1..5}; do
   systemctl enable --now hy2-$i
 done
 
+# 固定公网IP，写死在这里
+IP="107.174.88.122"
+
 # 打印链接
-IP=$(curl -s https://api.ip.sb/ip || hostname -I | awk '{print $1}')
 echo ""
 echo "✅ 节点链接："
 for j in {0..4}; do
