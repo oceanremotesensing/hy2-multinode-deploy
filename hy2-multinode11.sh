@@ -20,7 +20,7 @@ chmod +x /usr/local/bin/xray
 mkdir -p /etc/hysteria2 /etc/xray /etc/systemd/system
 
 # 固定公网IP
-IP="216.144.235.198"
+IP="107.174.88.122"
 
 # Hysteria2 5 节点配置
 PORTS=(443 8443 9443 10443 11443)
