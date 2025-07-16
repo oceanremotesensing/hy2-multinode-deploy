@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🔧 安装必备组件..."
+echo "🔧 更新系统并安装必备组件..."
 apt update
 apt install -y curl socat openssl
 
@@ -15,16 +15,19 @@ mkdir -p /etc/hysteria2
 cd /etc/hysteria2
 
 echo "🔧 生成自签名证书..."
-openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=localhost"
+if [[ ! -f cert.pem || ! -f key.pem ]]; then
+  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=localhost"
+else
+  echo "证书已存在，跳过生成"
+fi
 
-# 10个端口和密码
 PORTS=(443 8443 9443 10443 11443 12443 13443 14443 15443 16443)
 PASSWORDS=(
   "PwdHy2_1" "PwdHy2_2" "PwdHy2_3" "PwdHy2_4" "PwdHy2_5"
   "PwdHy2_6" "PwdHy2_7" "PwdHy2_8" "PwdHy2_9" "PwdHy2_10"
 )
 
-IP="216.144.235.198"
+IP=$(curl -s https://api.ipify.org) # 自动获取服务器公网IP
 
 for i in {1..10}; do
   idx=$((i-1))
@@ -33,16 +36,11 @@ listen: ":${PORTS[$idx]}"
 auth:
   type: password
   password: ${PASSWORDS[$idx]}
-masquerade:
-  type: http
-  http:
-    host: www.cloudflare.com
-    path: /
 tls:
   cert: /etc/hysteria2/cert.pem
   key: /etc/hysteria2/key.pem
 obfuscate:
-  type: "srtp"  # 混淆方式，可换为 other 支持的类型
+  type: srtp
 EOF
 
   cat > /etc/systemd/system/hy2-$i.service <<EOF
@@ -70,5 +68,5 @@ echo ""
 echo "✅ 节点链接："
 for idx in {0..9}; do
   num=$((idx+1))
-  echo "hy2://${PASSWORDS[$idx]}@$IP:${PORTS[$idx]}?insecure=1&sni=www.cloudflare.com#节点$num"
+  echo "hy2://${PASSWORDS[$idx]}@$IP:${PORTS[$idx]}?insecure=1#节点$num"
 done
