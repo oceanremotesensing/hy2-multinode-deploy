@@ -1,81 +1,99 @@
 #!/bin/bash
 set -e
 
-echo "🔧 正在安装 Hysteria 2 多节点环境（含混淆伪装）..."
+IP="107.174.88.122"
+PORT=443
+HYSTERIA_PORT=7890
+PASSWORD="YourStrongPassword123!"
 
-# 杀掉残留 hysteria 进程
-pkill -f hysteria || true
+echo "安装必要组件..."
+apt update
+apt install -y curl socat openssl nginx
 
-# 下载 hysteria 可执行文件
-rm -f /usr/local/bin/hysteria
+echo "安装 hysteria..."
 curl -Lo /usr/local/bin/hysteria https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64
 chmod +x /usr/local/bin/hysteria
 
-# 创建配置目录
+echo "生成自签证书..."
 mkdir -p /etc/hysteria2
 cd /etc/hysteria2
-
-# 生成自签证书 (10年有效期)
-openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=localhost"
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=$IP"
 chmod 600 key.pem cert.pem
 
-# 端口和密码
-PORTS=(443 8443 9443 10443 11443)
-PASSWORDS=("gS7kR9fQ" "X9vL2bTm" "mW8hPaYo" "T3nFcQzB" "Lp7tZxVu")
-
-# 生成配置和 systemd 服务，包含混淆伪装配置
-for i in {1..5}; do
-  j=$((i-1))
-  cat > config$i.yaml <<EOF
-listen: ":${PORTS[$j]}"
+echo "生成 hysteria 配置..."
+cat > config.yaml <<EOF
+listen: ":$HYSTERIA_PORT"
 auth:
   type: password
-  password: ${PASSWORDS[$j]}
+  password: "$PASSWORD"
 masquerade:
   type: proxy
   proxy:
-    url: https://www.cloudflare.com       # 伪装目标，可改成你想的域名
+    url: https://www.cloudflare.com
     rewriteHost: true
 tls:
   cert: /etc/hysteria2/cert.pem
   key: /etc/hysteria2/key.pem
 EOF
 
-  cat > /etc/systemd/system/hy2-$i.service <<EOF
+echo "生成 systemd 服务..."
+cat > /etc/systemd/system/hysteria.service <<EOF
 [Unit]
-Description=Hysteria2 Server Instance $i (with Obfuscation)
+Description=Hysteria Server with Nginx TLS Proxy
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria2/config$i.yaml
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria2/config.yaml
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-done
 
-# 重载 systemd 并启动服务
+echo "配置 Nginx 反向代理..."
+cat > /etc/nginx/sites-available/hysteria <<EOF
+server {
+    listen 80;
+    server_name $IP;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $IP;
+
+    ssl_certificate /etc/hysteria2/cert.pem;
+    ssl_certificate_key /etc/hysteria2/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location / {
+        proxy_pass https://127.0.0.1:$HYSTERIA_PORT;
+        proxy_ssl_verify off;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host www.cloudflare.com;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Accept-Encoding "";
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/hysteria /etc/nginx/sites-enabled/hysteria
+nginx -t && systemctl restart nginx
+
+echo "启动 hysteria 服务..."
 systemctl daemon-reload
-for i in {1..5}; do
-  systemctl enable --now hy2-$i
-done
+systemctl enable --now hysteria
 
-# 固定公网 IP
-IP="107.174.88.122"
-
-# 检查服务状态
-sleep 3
 echo ""
-echo "🔍 服务状态检查："
-for i in {1..5}; do
-  systemctl is-active --quiet hy2-$i && echo "hy2-$i 服务正常" || echo "hy2-$i 服务未运行"
-done
-
-# 打印节点链接
+echo "✅ 部署完成！"
+echo "连接示例："
+echo "hy2://$PASSWORD@$IP:$PORT?insecure=1&sni=www.cloudflare.com#hy2-nginx-obfuscation"
 echo ""
-echo "✅ 节点链接（Hysteria v2 + 混淆）："
-for j in {0..4}; do
-  echo "hy2://${PASSWORDS[$j]}@$IP:${PORTS[$j]}?insecure=1&sni=www.cloudflare.com#节点$((j+1))"
-done
+echo "注意：因使用自签证书，客户端需启用 insecure=1 忽略证书验证"
