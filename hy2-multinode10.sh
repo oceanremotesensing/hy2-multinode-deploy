@@ -2,7 +2,7 @@
 set -e
 
 echo "🔧 安装必备组件..."
-apt update && apt install -y curl socat openssl nginx
+apt update && apt install -y curl socat openssl unzip nginx
 
 echo "🔧 安装 hysteria..."
 pkill -f hysteria || true
@@ -12,9 +12,9 @@ chmod +x /usr/local/bin/hysteria
 
 echo "🔧 安装 xray..."
 pkill -f xray || true
-rm -f /usr/local/bin/xray
-curl -Lo /usr/local/bin/xray https://github.com/XTLS/Xray-core/releases/latest/download/xray-linux-64.zip
-unzip -o xray-linux-64.zip xray -d /usr/local/bin/
+rm -f /usr/local/bin/xray /usr/local/bin/xray.zip
+curl -Lo /usr/local/bin/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+unzip -o /usr/local/bin/xray.zip xray -d /usr/local/bin/
 chmod +x /usr/local/bin/xray
 
 mkdir -p /etc/hysteria2 /etc/xray /etc/systemd/system
