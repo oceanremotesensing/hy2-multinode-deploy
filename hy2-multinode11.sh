@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🔧 安装必备组件..."
+echo "🔧 更新系统并安装必备组件..."
 apt update
 apt install -y curl socat openssl
 
@@ -21,14 +21,13 @@ else
   echo "证书已存在，跳过生成"
 fi
 
-# 10个端口和密码
 PORTS=(443 8443 9443 10443 11443 12443 13443 14443 15443 16443)
 PASSWORDS=(
   "PwdHy2_1" "PwdHy2_2" "PwdHy2_3" "PwdHy2_4" "PwdHy2_5"
   "PwdHy2_6" "PwdHy2_7" "PwdHy2_8" "PwdHy2_9" "PwdHy2_10"
 )
 
-IP="107.174.88.122"
+IP=$(curl -s https://api.ipify.org) # 自动获取服务器公网IP
 
 for i in {1..10}; do
   idx=$((i-1))
