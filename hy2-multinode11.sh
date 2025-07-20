@@ -21,7 +21,10 @@ else
   echo "证书已存在，跳过生成"
 fi
 
-PORTS=(8443 9443 10443 11443 12443 13443 14443 15443 16443 17443)
+# TCP端口列表
+TCP_PORTS=(8443 9443 10443 11443 12443 13443 14443 15443 16443 17443)
+# UDP端口列表，和TCP端口对应但错开100
+UDP_PORTS=(8543 9543 10543 11543 12543 13543 14543 15543 16543 17543)
 PASSWORDS=(
   "PwdHy2_1" "PwdHy2_2" "PwdHy2_3" "PwdHy2_4" "PwdHy2_5"
   "PwdHy2_6" "PwdHy2_7" "PwdHy2_8" "PwdHy2_9" "PwdHy2_10"
@@ -33,7 +36,9 @@ echo "🔧 写入配置并创建服务..."
 for i in {1..10}; do
   idx=$((i-1))
   cat > config$i.yaml <<EOF
-listen: ":${PORTS[$idx]}"
+listen:
+  tcp: ":${TCP_PORTS[$idx]}"
+  udp: ":${UDP_PORTS[$idx]}"
 auth:
   type: password
   password: ${PASSWORDS[$idx]}
@@ -42,7 +47,7 @@ tls:
   key: /etc/hysteria2/key.pem
 obfuscate:
   type: srtp
-disable-quic: true
+disable-quic: false
 EOF
 
   cat > /etc/systemd/system/hy2-$i.service <<EOF
@@ -73,5 +78,5 @@ echo ""
 echo "✅ 节点链接："
 for idx in {0..9}; do
   num=$((idx+1))
-  echo "hy2://${PASSWORDS[$idx]}@$IP:${PORTS[$idx]}?insecure=1#节点$num"
+  echo "hy2://${PASSWORDS[$idx]}@$IP:${TCP_PORTS[$idx]}?insecure=1#节点$num"
 done
