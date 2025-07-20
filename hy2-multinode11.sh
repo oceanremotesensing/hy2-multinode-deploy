@@ -29,6 +29,7 @@ PASSWORDS=(
 
 IP=$(curl -s https://api.ipify.org) # 自动获取服务器公网IP
 
+echo "🔧 写入配置并创建服务..."
 for i in {1..10}; do
   idx=$((i-1))
   cat > config$i.yaml <<EOF
@@ -52,14 +53,17 @@ After=network.target
 ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria2/config$i.yaml
 Restart=always
 RestartSec=5
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=false
 
 [Install]
 WantedBy=multi-user.target
 EOF
 done
 
+echo "🔧 启动所有服务..."
 systemctl daemon-reload
-
 for i in {1..10}; do
   systemctl enable --now hy2-$i
 done
