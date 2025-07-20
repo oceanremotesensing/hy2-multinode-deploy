@@ -21,13 +21,14 @@ else
   echo "证书已存在，跳过生成"
 fi
 
-PORTS=(443 8443 9443 10443 11443 12443 13443 14443 15443 16443)
+# 避免使用443端口，换成高位端口，确保和其他服务不冲突
+PORTS=(8443 9443 10443 11443 12443 13443 14443 15443 16443 17443)
 PASSWORDS=(
   "PwdHy2_1" "PwdHy2_2" "PwdHy2_3" "PwdHy2_4" "PwdHy2_5"
   "PwdHy2_6" "PwdHy2_7" "PwdHy2_8" "PwdHy2_9" "PwdHy2_10"
 )
 
-IP=$(curl -s https://api.ipify.org) # 自动获取服务器公网IP
+IP=$(curl -s https://api.ipify.org)
 
 echo "🔧 写入配置并创建服务..."
 for i in {1..10}; do
@@ -42,6 +43,7 @@ tls:
   key: /etc/hysteria2/key.pem
 obfuscate:
   type: srtp
+disable-quic: true
 EOF
 
   cat > /etc/systemd/system/hy2-$i.service <<EOF
@@ -53,9 +55,10 @@ After=network.target
 ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria2/config$i.yaml
 Restart=always
 RestartSec=5
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-NoNewPrivileges=false
+# 去掉CAP_NET_ADMIN和CAP_NET_RAW，减少网络干扰风险
+# CapabilityBoundingSet=
+# AmbientCapabilities=
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
