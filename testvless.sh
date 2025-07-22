@@ -6,18 +6,30 @@ FAKE_HOST="www.cloudflare.com"
 PORTS=(443 8443 9443 10443 11443 12443 13443 14443 15443 16443)
 NODE_NAME_PREFIX="REALITY"
 
+echo "==== 1. 清理旧 Xray 服务和配置 ===="
+systemctl stop xray || true
+systemctl disable xray || true
+rm -f /usr/local/etc/xray/config.json
+rm -f /etc/systemd/system/xray.service
+rm -f /usr/local/bin/xray
+systemctl daemon-reload
+echo "旧服务清理完成。"
+
+echo "==== 2. 安装必要依赖 ===="
 apt update -qq
 apt install -y curl unzip socat jq openssl
 
-echo "🔧 安装或更新 Xray-core..."
+echo "==== 3. 安装/更新 Xray-core ===="
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
 CLIENT_INFO_DIR=$(mktemp -d)
 INBOUNDS_CONFIG=""
 
+echo "==== 4. 生成配置及密钥 ===="
 for i in "${!PORTS[@]}"; do
   node_index=$((i+1))
   port=${PORTS[$i]}
+  echo "生成节点 $node_index : 端口 $port"
 
   UUID=$(xray uuid)
   KEY_PAIR=$(xray x25519)
@@ -61,6 +73,7 @@ EOF
   fi
 done
 
+echo "==== 5. 写入 Xray 配置文件 ===="
 cat > /usr/local/etc/xray/config.json <<EOF
 {
   "log": {"loglevel": "warning"},
@@ -74,6 +87,7 @@ cat > /usr/local/etc/xray/config.json <<EOF
 }
 EOF
 
+echo "==== 6. 创建 systemd 服务文件 ===="
 cat >/etc/systemd/system/xray.service <<EOF
 [Unit]
 Description=Xray Service
@@ -88,11 +102,13 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
+echo "==== 7. 启动并启用 Xray 服务 ===="
 systemctl daemon-reload
 systemctl enable xray
 systemctl restart xray
 
-# 纯粹输出链接，无任何额外内容
+echo ""
+echo "==== 部署完成，以下是 10 条 Reality VLESS 链接 ===="
 for i in $(seq 1 10); do
   UUID=$(cat "$CLIENT_INFO_DIR/node${i}.uuid")
   PUBKEY=$(cat "$CLIENT_INFO_DIR/node${i}.pub")
@@ -103,3 +119,6 @@ for i in $(seq 1 10); do
 done
 
 rm -rf "$CLIENT_INFO_DIR"
+
+echo ""
+echo "请确保防火墙放行端口：${PORTS[*]}"
