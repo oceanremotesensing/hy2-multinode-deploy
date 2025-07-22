@@ -2,10 +2,9 @@
 set -e
 
 # --- 脚本配置 ---
-# 为 REALITY 设置一个真实、可访问的目标网站（伪装目标）
-# 您可以根据需要更改为其他网站，如 "www.microsoft.com"
-DECOY_DOMAIN="www.google.com"
+DECOY_DOMAIN="www.microsoft.com"
 
+# --- 脚本变量 ---
 BASE_PORT=443
 XRAY_BIN="/usr/local/bin/xray"
 CONFIG_PATH="/usr/local/etc/xray/config.json"
@@ -21,36 +20,45 @@ echo "您的域名将设置为: $DOMAIN"
 echo "REALITY 伪装域名为: $DECOY_DOMAIN"
 echo "----------------------------------------"
 
-echo "🔧 更新系统并安装依赖..."
+echo "🔧 更新系统并安装依赖 (包含setcap工具)..."
 apt update -y
-apt install -y curl socat openssl iptables-persistent unzip
+apt install -y curl socat openssl iptables-persistent unzip libcap2-bin
 
-echo "🔧 下载最新 Xray..."
-# 如果遇到网络问题，可以手动替换下面的下载链接
+echo "🔧 下载并安装最新 Xray..."
 curl -Lo /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
 unzip -o /tmp/xray.zip -d /usr/local/bin/
 rm -f /tmp/xray.zip
 chmod +x $XRAY_BIN
 
-echo "🔧 生成10个UUID、privateKey和shortIds..."
+echo "🔧 授予 Xray 绑定特权端口的能力..."
+setcap 'cap_net_bind_service=+ep' $XRAY_BIN
+
+echo "🔧 生成10组匹配的UUID和密钥对 (私钥+公钥)..."
 declare -a UUIDS
 declare -a PRIVATE_KEYS
-declare -a SHORTID1S
-declare -a SHORTID2S
+declare -a PUBLIC_KEYS
+declare -a SHORTIDS
 
+# 修正后的逻辑：一次性生成并存储所有需要的密钥
 for i in {0..9}; do
   UUIDS[$i]=$(cat /proc/sys/kernel/random/uuid)
-  # Xray 1.8.1+ a private key with a length of 32 bytes (64 hex characters) is required
-  PRIVATE_KEYS[$i]=$($XRAY_BIN x25519 | awk 'NR==1 {print $3}')
-  SHORTID1S[$i]=$(openssl rand -hex 8)
-  SHORTID2S[$i]=$(openssl rand -hex 8)
+  # 生成一组密钥对
+  KEYS=$($XRAY_BIN x25519)
+  # 将私钥和公钥分别存入数组
+  PRIVATE_KEYS[$i]=$(echo "$KEYS" | awk '/Private key/ {print $3}')
+  PUBLIC_KEYS[$i]=$(echo "$KEYS" | awk '/Public key/ {print $3}')
+  SHORTIDS[$i]=$(openssl rand -hex 8)
 done
+echo "✅ 10组密钥对已生成并保存完毕。"
 
 echo "🔧 创建日志目录并授权..."
 mkdir -p /var/log/xray
 chown -R nobody:nogroup /var/log/xray
 
 echo "🔧 生成 Xray 配置文件..."
+# 清空旧文件
+> $CONFIG_PATH
+
 cat > $CONFIG_PATH <<EOF
 {
   "log": {
@@ -61,13 +69,13 @@ cat > $CONFIG_PATH <<EOF
   "inbounds": [
 EOF
 
+# 使用之前保存好的密钥写入配置
 for i in {0..9}; do
   PORT=$((BASE_PORT + i*1000))
   UUID=${UUIDS[$i]}
   PRIVATE_KEY=${PRIVATE_KEYS[$i]}
-  SHORTID1=${SHORTID1S[$i]}
-  SHORTID2=${SHORTID2S[$i]}
-  # 追加节点配置
+  SHORTID=${SHORTIDS[$i]}
+  
   cat >> $CONFIG_PATH <<EOF
     {
       "port": $PORT,
@@ -93,8 +101,7 @@ for i in {0..9}; do
           ],
           "privateKey": "$PRIVATE_KEY",
           "shortIds": [
-            "$SHORTID1",
-            "$SHORTID2"
+            "$SHORTID"
           ]
         }
       }
@@ -113,6 +120,11 @@ cat >> $CONFIG_PATH <<EOF
   ]
 }
 EOF
+echo "✅ 配置文件已使用正确的私钥生成。"
+
+echo "🔧 设置配置文件权限..."
+chown nobody:nogroup $CONFIG_PATH
+chmod 644 $CONFIG_PATH
 
 echo "🔧 创建 systemd 服务文件..."
 cat > $SERVICE_PATH <<EOF
@@ -123,8 +135,10 @@ After=network.target
 [Service]
 Type=simple
 User=nobody
-ExecStart=$XRAY_BIN run -config $CONFIG_PATH
 Restart=on-failure
+RestartSec=5s
+LimitNPROC=10000
+LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
@@ -142,33 +156,34 @@ for i in {0..9}; do
 done
 netfilter-persistent save
 
-echo "✅ 安装完成，Xray + 10个 Reality 节点服务已启动"
+echo "⏳ 等待服务启动并进行最终状态检查..."
+sleep 3
+# 最终检查服务状态，如果失败则显示日志
+systemctl status xray --no-pager || (journalctl -u xray -n 20 && exit 1)
+
 echo ""
-echo "================ 节点信息 ================"
+echo "✅ 安装完成！下面是您【正确】的节点信息："
+echo "==================================================="
+# 使用之前保存好的、与配置文件匹配的公钥生成链接
 for i in {0..9}; do
   PORT=$((BASE_PORT + i*1000))
   UUID=${UUIDS[$i]}
-  # 从配置文件中获取正确的公私钥对
-  KEYS=$($XRAY_BIN x25519)
-  PRIVATE_KEY=$(echo "$KEYS" | awk '/Private key/ {print $3}')
-  PUBLIC_KEY=$(echo "$KEYS" | awk '/Public key/ {print $3}')
-  SHORTID1=${SHORTID1S[$i]}
+  PUBLIC_KEY=${PUBLIC_KEYS[$i]}
+  SHORTID=${SHORTIDS[$i]}
   
   echo "----------------------------------------"
   echo "节点 $((i+1)):"
+  echo "地址 (Address): $DOMAIN"
   echo "端口 (Port): $PORT"
   echo "UUID: $UUID"
   echo "公钥 (pbk): $PUBLIC_KEY"
-  echo "Short ID (sid): $SHORTID1"
-  echo "客户端 SNI: $DOMAIN"
+  echo "Short ID (sid): $SHORTID"
   echo ""
   echo "VLESS 链接 (点击复制):"
-  echo "vless://$UUID@$DOMAIN:$PORT?encryption=none&security=reality&sni=$DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORTID1&flow=xtls-rprx-vision#${DOMAIN}_${PORT}"
+  echo "vless://$UUID@$DOMAIN:$PORT?encryption=none&security=reality&sni=$DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORTID&flow=xtls-rprx-vision#${DOMAIN}_${PORT}"
 done
-echo "=========================================="
+echo "==================================================="
 echo ""
 echo "重要提示："
-echo "1. REALITY 的伪装目标网站已设为 $DECOY_DOMAIN。"
-echo "2. 请确保您的域名 $DOMAIN 已正确解析到本服务器的 IP 地址。"
-echo "3. 请务必检查您的VPS提供商（如阿里云、谷歌云）的安全组，确保端口 443, 1443, ..., 9443 已放行。"
-echo "4. 如果仍然无法连接，请使用 'systemctl status xray' 或 'journalctl -u xray' 查看服务日志。"
+echo "1. 请务必使用上面新生成的链接，旧的链接已全部失效！"
+echo "2. 如果运行此脚本后还不能连接，问题将 100% 在于【VPS提供商的防火墙/安全组】，请务必检查并放行端口 443, 1443, 等。"
