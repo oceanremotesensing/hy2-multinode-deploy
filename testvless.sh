@@ -105,7 +105,7 @@ for i in $(seq 1 10); do
 
   VLESS_LINK="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=reality&sni=${FAKE_HOST}&fp=chrome&pbk=${PUBKEY}&sid=${SHORTID}&flow=xtls-rprx-vision#${NODE_NAME_PREFIX}-${i}"
 
-  echo "节点 $i ：$VLESS_LINK"
+  echo "$VLESS_LINK"
 done
 
 echo "--------------------------------------------------"
