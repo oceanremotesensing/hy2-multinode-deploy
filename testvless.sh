@@ -93,21 +93,14 @@ systemctl daemon-reload
 systemctl enable xray
 systemctl restart xray
 
-echo ""
-echo "✅ 部署完成！以下是你的 10 个 Reality 节点链接："
-echo "--------------------------------------------------"
-
+# 输出纯净链接
 for i in $(seq 1 10); do
   UUID=$(cat "$CLIENT_INFO_DIR/node${i}.uuid")
   PUBKEY=$(cat "$CLIENT_INFO_DIR/node${i}.pub")
   SHORTID=$(cat "$CLIENT_INFO_DIR/node${i}.sid")
   PORT=${PORTS[$((i-1))]}
 
-  VLESS_LINK="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=reality&sni=${FAKE_HOST}&fp=chrome&pbk=${PUBKEY}&sid=${SHORTID}&flow=xtls-rprx-vision#${NODE_NAME_PREFIX}-${i}"
-
-  echo "$VLESS_LINK"
+  echo "vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=reality&sni=${FAKE_HOST}&fp=chrome&pbk=${PUBKEY}&sid=${SHORTID}&flow=xtls-rprx-vision#${NODE_NAME_PREFIX}-${i}"
 done
 
-echo "--------------------------------------------------"
-echo "请确保你的防火墙放行所有上述端口（TCP）"
 rm -rf "$CLIENT_INFO_DIR"
