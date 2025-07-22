@@ -18,7 +18,6 @@ INBOUNDS_CONFIG=""
 for i in "${!PORTS[@]}"; do
   node_index=$((i+1))
   port=${PORTS[$i]}
-  echo "🔧 生成第 $node_index 个节点配置: 端口 $port"
 
   UUID=$(xray uuid)
   KEY_PAIR=$(xray x25519)
@@ -93,7 +92,7 @@ systemctl daemon-reload
 systemctl enable xray
 systemctl restart xray
 
-# 输出纯净链接
+# 纯粹输出链接，无任何额外内容
 for i in $(seq 1 10); do
   UUID=$(cat "$CLIENT_INFO_DIR/node${i}.uuid")
   PUBKEY=$(cat "$CLIENT_INFO_DIR/node${i}.pub")
