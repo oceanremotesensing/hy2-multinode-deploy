@@ -1,54 +1,66 @@
 #!/bin/bash
 set -euo pipefail
 
-DOMAIN="wjfreeonekeycard.top"
-FAKE_HOST="www.cloudflare.com"
-PORTS=(443 8443 9443 10443 11443 12443 13443 14443 15443 16443)
+# --- 用户配置 ---
+PORTS=(443 8443 9443 10443 11443 12443 13443 14443 15443)
+DEST_DOMAIN="wjfreeonekeycard.top"
 NODE_NAME_PREFIX="REALITY"
+# --- 配置结束 ---
 
-echo "==== 1. 清理旧 Xray 服务和配置 ===="
+NODES=${#PORTS[@]}
+
+echo "🔧 [1/7] 停止旧服务并安装依赖..."
 systemctl stop xray || true
 systemctl disable xray || true
-rm -f /usr/local/etc/xray/config.json
-rm -f /etc/systemd/system/xray.service
-rm -f /usr/local/bin/xray
-systemctl daemon-reload
-echo "旧服务清理完成。"
-
-echo "==== 2. 安装必要依赖 ===="
 apt update -qq
-apt install -y curl unzip socat jq openssl
+apt install -y curl unzip socat openssl
 
-echo "==== 3. 安装/更新 Xray-core ===="
+echo "🔧 [2/7] 安装/更新 Xray-core..."
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
+echo "🔧 [3/7] 生成 ${NODES} 组 REALITY 密钥和 UUID..."
 CLIENT_INFO_DIR=$(mktemp -d)
-INBOUNDS_CONFIG=""
 
-echo "==== 4. 生成配置及密钥 ===="
-for i in "${!PORTS[@]}"; do
+for ((i=0; i<NODES; i++)); do
   node_index=$((i+1))
-  port=${PORTS[$i]}
-  echo "生成节点 $node_index : 端口 $port"
-
-  UUID=$(xray uuid)
-  KEY_PAIR=$(xray x25519)
+  KEY_PAIR=$(/usr/local/bin/xray x25519)
   PRIVATE_KEY=$(echo "$KEY_PAIR" | awk '/Private key/ {print $3}')
   PUBLIC_KEY=$(echo "$KEY_PAIR" | awk '/Public key/ {print $3}')
+  UUID=$(/usr/local/bin/xray uuid)
   SHORT_ID=$(openssl rand -hex 8)
+  
+  echo "$PRIVATE_KEY" > "${CLIENT_INFO_DIR}/node${node_index}.priv"
+  echo "$PUBLIC_KEY" > "${CLIENT_INFO_DIR}/node${node_index}.pub"
+  echo "$UUID" > "${CLIENT_INFO_DIR}/node${node_index}.uuid"
+  echo "$SHORT_ID" > "${CLIENT_INFO_DIR}/node${node_index}.sid"
+done
 
-  echo "$UUID" > "$CLIENT_INFO_DIR/node${node_index}.uuid"
-  echo "$PRIVATE_KEY" > "$CLIENT_INFO_DIR/node${node_index}.priv"
-  echo "$PUBLIC_KEY" > "$CLIENT_INFO_DIR/node${node_index}.pub"
-  echo "$SHORT_ID" > "$CLIENT_INFO_DIR/node${node_index}.sid"
+echo "🔧 [4/7] 创建服务器配置文件..."
+CONFIG_JSON_HEAD='{
+  "log": {"loglevel": "warning"},
+  "inbounds": ['
+CONFIG_JSON_OUTBOUNDS='],
+  "outbounds": [
+    {"protocol": "freedom", "tag": "direct"},
+    {"protocol": "blackhole", "tag": "block"}
+  ]
+}'
+INBOUNDS_CONFIG=""
 
-  inbound=$(cat <<EOF
+for ((i=0; i<NODES; i++)); do
+  node_index=$((i+1))
+  port=${PORTS[$i]}
+  private_key=$(cat "${CLIENT_INFO_DIR}/node${node_index}.priv")
+  uuid=$(cat "${CLIENT_INFO_DIR}/node${node_index}.uuid")
+  short_id=$(cat "${CLIENT_INFO_DIR}/node${node_index}.sid")
+
+  current_inbound=$(cat <<EOF
     {
       "listen": "0.0.0.0",
-      "port": $port,
+      "port": ${port},
       "protocol": "vless",
       "settings": {
-        "clients": [{"id": "$UUID", "flow": "xtls-rprx-vision"}],
+        "clients": [{"id": "${uuid}", "flow": "xtls-rprx-vision"}],
         "decryption": "none"
       },
       "streamSettings": {
@@ -56,69 +68,58 @@ for i in "${!PORTS[@]}"; do
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "$FAKE_HOST:443",
+          "dest": "${DEST_DOMAIN}:443",
           "xver": 0,
-          "serverNames": ["$FAKE_HOST"],
-          "privateKey": "$PRIVATE_KEY",
-          "shortId": "$SHORT_ID"
+          "serverNames": ["${DEST_DOMAIN}"],
+          "privateKey": "${private_key}",
+          "shortIds": ["${short_id}"]
         }
       }
     }
 EOF
 )
-
-  INBOUNDS_CONFIG+="$inbound"
-  if [ $i -lt $((${#PORTS[@]} - 1)) ]; then
+  INBOUNDS_CONFIG+="${current_inbound}"
+  if (( i < NODES - 1 )); then
     INBOUNDS_CONFIG+=","
   fi
 done
 
-echo "==== 5. 写入 Xray 配置文件 ===="
-cat > /usr/local/etc/xray/config.json <<EOF
-{
-  "log": {"loglevel": "warning"},
-  "inbounds": [
-    $INBOUNDS_CONFIG
-  ],
-  "outbounds": [
-    {"protocol": "freedom", "tag": "direct"},
-    {"protocol": "blackhole", "tag": "block"}
-  ]
-}
-EOF
+echo "${CONFIG_JSON_HEAD}${INBOUNDS_CONFIG}${CONFIG_JSON_OUTBOUNDS}" > /usr/local/etc/xray/config.json
 
-echo "==== 6. 创建 systemd 服务文件 ===="
-cat >/etc/systemd/system/xray.service <<EOF
-[Unit]
-Description=Xray Service
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
-Restart=on-failure
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-echo "==== 7. 启动并启用 Xray 服务 ===="
+echo "🔧 [5/7] 启动 Xray 服务..."
 systemctl daemon-reload
 systemctl enable xray
 systemctl restart xray
 
-echo ""
-echo "==== 部署完成，以下是 10 条 Reality VLESS 链接 ===="
-for i in $(seq 1 10); do
-  UUID=$(cat "$CLIENT_INFO_DIR/node${i}.uuid")
-  PUBKEY=$(cat "$CLIENT_INFO_DIR/node${i}.pub")
-  SHORTID=$(cat "$CLIENT_INFO_DIR/node${i}.sid")
-  PORT=${PORTS[$((i-1))]}
+sleep 2
+if ! systemctl status xray --no-pager | grep -q "active (running)"; then
+  echo "❌ Xray 服务启动失败，请检查日志！"
+  journalctl -u xray -n 50
+  exit 1
+fi
 
-  echo "vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=reality&sni=${FAKE_HOST}&fp=chrome&pbk=${PUBKEY}&sid=${SHORTID}&flow=xtls-rprx-vision#${NODE_NAME_PREFIX}-${i}"
+echo "🔧 [6/7] 生成 ${NODES} 个客户端配置链接..."
+echo ""
+echo "✅ 部署完成！以下是你的 ${NODES} 个 Reality 节点链接："
+echo "--------------------------------------------------"
+
+for ((i=0; i<NODES; i++)); do
+  node_index=$((i+1))
+  port=${PORTS[$i]}
+  uuid=$(cat "${CLIENT_INFO_DIR}/node${node_index}.uuid")
+  public_key=$(cat "${CLIENT_INFO_DIR}/node${node_index}.pub")
+  short_id=$(cat "${CLIENT_INFO_DIR}/node${node_index}.sid")
+  
+  VLESS_LINK="vless://${uuid}@${DEST_DOMAIN}:${port}?encryption=none&security=reality&sni=${DEST_DOMAIN}&fp=chrome&pbk=${public_key}&sid=${short_id}&flow=xtls-rprx-vision#${NODE_NAME_PREFIX}-${node_index}"
+  echo "${VLESS_LINK}"
+  echo ""
 done
 
+echo "--------------------------------------------------"
+
+echo "🔧 [7/7] 清理临时文件..."
 rm -rf "$CLIENT_INFO_DIR"
 
 echo ""
-echo "请确保防火墙放行端口：${PORTS[*]}"
+echo "⚠️ 重要提示：请务必确保服务器防火墙和云服务商安全组放行以下端口（TCP协议）:"
+echo "${PORTS[*]}"
