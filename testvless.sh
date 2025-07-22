@@ -1,66 +1,66 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
-# --- 用户配置 ---
-PORTS=(443 8443 9443 10443 11443 12443 13443 14443 15443)
-DEST_DOMAIN="wjfreeonekeycard.top"
-NODE_NAME_PREFIX="REALITY"
-# --- 配置结束 ---
+DOMAIN="wjfreeonekeycard.top"
+BASE_PORT=443
+XRAY_BIN="/usr/local/bin/xray"
+CONFIG_PATH="/usr/local/etc/xray/config.json"
+SERVICE_PATH="/etc/systemd/system/xray.service"
 
-NODES=${#PORTS[@]}
+echo "🔧 更新系统并安装依赖..."
+apt update -y
+apt install -y curl socat openssl iptables-persistent unzip
 
-echo "🔧 [1/7] 停止旧服务并安装依赖..."
-systemctl stop xray || true
-systemctl disable xray || true
-apt update -qq
-apt install -y curl unzip socat openssl
+echo "🔧 下载最新 Xray..."
+curl -Lo /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+unzip -o /tmp/xray.zip -d /usr/local/bin/
+rm -f /tmp/xray.zip
+chmod +x $XRAY_BIN
 
-echo "🔧 [2/7] 安装/更新 Xray-core..."
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+echo "🔧 生成10个UUID、privateKey和shortIds..."
 
-echo "🔧 [3/7] 生成 ${NODES} 组 REALITY 密钥和 UUID..."
-CLIENT_INFO_DIR=$(mktemp -d)
+declare -a UUIDS
+declare -a PRIVATE_KEYS
+declare -a SHORTID1S
+declare -a SHORTID2S
 
-for ((i=0; i<NODES; i++)); do
-  node_index=$((i+1))
-  KEY_PAIR=$(/usr/local/bin/xray x25519)
-  PRIVATE_KEY=$(echo "$KEY_PAIR" | awk '/Private key/ {print $3}')
-  PUBLIC_KEY=$(echo "$KEY_PAIR" | awk '/Public key/ {print $3}')
-  UUID=$(/usr/local/bin/xray uuid)
-  SHORT_ID=$(openssl rand -hex 8)
-  
-  echo "$PRIVATE_KEY" > "${CLIENT_INFO_DIR}/node${node_index}.priv"
-  echo "$PUBLIC_KEY" > "${CLIENT_INFO_DIR}/node${node_index}.pub"
-  echo "$UUID" > "${CLIENT_INFO_DIR}/node${node_index}.uuid"
-  echo "$SHORT_ID" > "${CLIENT_INFO_DIR}/node${node_index}.sid"
+for i in {0..9}; do
+  UUIDS[$i]=$(cat /proc/sys/kernel/random/uuid)
+  PRIVATE_KEYS[$i]=$(openssl rand -hex 32)
+  SHORTID1S[$i]=$(openssl rand -hex 8)
+  SHORTID2S[$i]=$(openssl rand -hex 8)
 done
 
-echo "🔧 [4/7] 创建服务器配置文件..."
-CONFIG_JSON_HEAD='{
-  "log": {"loglevel": "warning"},
-  "inbounds": ['
-CONFIG_JSON_OUTBOUNDS='],
-  "outbounds": [
-    {"protocol": "freedom", "tag": "direct"},
-    {"protocol": "blackhole", "tag": "block"}
-  ]
-}'
-INBOUNDS_CONFIG=""
+echo "🔧 生成 Xray 配置文件..."
 
-for ((i=0; i<NODES; i++)); do
-  node_index=$((i+1))
-  port=${PORTS[$i]}
-  private_key=$(cat "${CLIENT_INFO_DIR}/node${node_index}.priv")
-  uuid=$(cat "${CLIENT_INFO_DIR}/node${node_index}.uuid")
-  short_id=$(cat "${CLIENT_INFO_DIR}/node${node_index}.sid")
+cat > $CONFIG_PATH <<EOF
+{
+  "log": {
+    "access": "/var/log/xray/access.log",
+    "error": "/var/log/xray/error.log",
+    "loglevel": "info"
+  },
+  "inbounds": [
+EOF
 
-  current_inbound=$(cat <<EOF
+for i in {0..9}; do
+  PORT=$((BASE_PORT + i*1000))
+  UUID=${UUIDS[$i]}
+  PRIVATE_KEY=${PRIVATE_KEYS[$i]}
+  SHORTID1=${SHORTID1S[$i]}
+  SHORTID2=${SHORTID2S[$i]}
+  # 追加节点配置
+  cat >> $CONFIG_PATH <<EOF
     {
-      "listen": "0.0.0.0",
-      "port": ${port},
+      "port": $PORT,
       "protocol": "vless",
       "settings": {
-        "clients": [{"id": "${uuid}", "flow": "xtls-rprx-vision"}],
+        "clients": [
+          {
+            "id": "$UUID",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
         "decryption": "none"
       },
       "streamSettings": {
@@ -68,58 +68,77 @@ for ((i=0; i<NODES; i++)); do
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "${DEST_DOMAIN}:443",
+          "dest": "$DOMAIN:$PORT",
           "xver": 0,
-          "serverNames": ["${DEST_DOMAIN}"],
-          "privateKey": "${private_key}",
-          "shortIds": ["${short_id}"]
+          "serverNames": [
+            "$DOMAIN"
+          ],
+          "privateKey": "$PRIVATE_KEY",
+          "shortIds": [
+            "$SHORTID1",
+            "$SHORTID2"
+          ]
         }
       }
-    }
+    }$( [ $i -lt 9 ] && echo "," )
 EOF
-)
-  INBOUNDS_CONFIG+="${current_inbound}"
-  if (( i < NODES - 1 )); then
-    INBOUNDS_CONFIG+=","
-  fi
 done
 
-echo "${CONFIG_JSON_HEAD}${INBOUNDS_CONFIG}${CONFIG_JSON_OUTBOUNDS}" > /usr/local/etc/xray/config.json
+cat >> $CONFIG_PATH <<EOF
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "direct"
+    }
+  ]
+}
+EOF
 
-echo "🔧 [5/7] 启动 Xray 服务..."
+echo "🔧 创建 systemd 服务文件..."
+
+cat > $SERVICE_PATH <<EOF
+[Unit]
+Description=Xray Service
+After=network.target
+
+[Service]
+Type=simple
+User=nobody
+ExecStart=$XRAY_BIN run -config $CONFIG_PATH
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "🔧 重新加载 systemd，启动并启用 Xray 服务..."
 systemctl daemon-reload
 systemctl enable xray
 systemctl restart xray
 
-sleep 2
-if ! systemctl status xray --no-pager | grep -q "active (running)"; then
-  echo "❌ Xray 服务启动失败，请检查日志！"
-  journalctl -u xray -n 50
-  exit 1
-fi
-
-echo "🔧 [6/7] 生成 ${NODES} 个客户端配置链接..."
-echo ""
-echo "✅ 部署完成！以下是你的 ${NODES} 个 Reality 节点链接："
-echo "--------------------------------------------------"
-
-for ((i=0; i<NODES; i++)); do
-  node_index=$((i+1))
-  port=${PORTS[$i]}
-  uuid=$(cat "${CLIENT_INFO_DIR}/node${node_index}.uuid")
-  public_key=$(cat "${CLIENT_INFO_DIR}/node${node_index}.pub")
-  short_id=$(cat "${CLIENT_INFO_DIR}/node${node_index}.sid")
-  
-  VLESS_LINK="vless://${uuid}@${DEST_DOMAIN}:${port}?encryption=none&security=reality&sni=${DEST_DOMAIN}&fp=chrome&pbk=${public_key}&sid=${short_id}&flow=xtls-rprx-vision#${NODE_NAME_PREFIX}-${node_index}"
-  echo "${VLESS_LINK}"
-  echo ""
+echo "🔧 放行防火墙端口..."
+for i in {0..9}; do
+  PORT=$((BASE_PORT + i*1000))
+  iptables -I INPUT -p tcp --dport $PORT -j ACCEPT
 done
+netfilter-persistent save
 
-echo "--------------------------------------------------"
+echo "✅ 安装完成，Xray + 10个 Reality 节点服务已启动"
 
-echo "🔧 [7/7] 清理临时文件..."
-rm -rf "$CLIENT_INFO_DIR"
-
-echo ""
-echo "⚠️ 重要提示：请务必确保服务器防火墙和云服务商安全组放行以下端口（TCP协议）:"
-echo "${PORTS[*]}"
+echo "节点信息如下："
+for i in {0..9}; do
+  PORT=$((BASE_PORT + i*1000))
+  UUID=${UUIDS[$i]}
+  PRIVATE_KEY=${PRIVATE_KEYS[$i]}
+  SHORTID1=${SHORTID1S[$i]}
+  SHORTID2=${SHORTID2S[$i]}
+  echo "------------------------------"
+  echo "端口: $PORT"
+  echo "UUID: $UUID"
+  echo "privateKey: $PRIVATE_KEY"
+  echo "shortIds: $SHORTID1, $SHORTID2"
+  echo "链接示例："
+  echo "vless://$UUID@$DOMAIN:$PORT?encryption=none&security=reality&sni=$DOMAIN&fp=chrome&pbk=$PRIVATE_KEY&sid=$SHORTID1&flow=xtls-rprx-vision#$DOMAIN-$PORT"
+done
