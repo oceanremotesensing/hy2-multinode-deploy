@@ -111,7 +111,7 @@ obfuscate:
   type: srtp
 EOF
 
-  cat > /etc/systemd/system/hy2-$i.service <<EOF
+   cat > /etc/systemd/system/hy2-$i.service <<EOF
 [Unit]
 Description=Hysteria v2 Node $i
 After=network.target
@@ -123,6 +123,9 @@ RestartSec=5
 StandardOutput=syslog
 StandardError=syslog
 SyslogIdentifier=hy2-$i
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
