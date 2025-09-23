@@ -222,7 +222,7 @@ BANNER
         fi
     else
         echo -e "${YELLOW}在 $url_file 中未找到有效节点.${NC}"
-        while true; do
+        while true;
             read -r -p "请手动粘贴一个 vmess:// 链接: " selected_url
             if [[ "$selected_url" != vmess://* ]]; then
                 echo -e "${RED}格式错误, 必须以 vmess:// 开头.${NC}"; continue
@@ -231,7 +231,7 @@ BANNER
             if [ -z "$decoded_json" ]; then
                 echo -e "${RED}无法解码链接, 请检查链接是否完整有效.${NC}"; continue
             fi
-            if ! echo "$decoded_json" | jq -e .ps >/dev/null 2>&1; then
+            if ! echo "$decoded_json" | jq -e .ps >/dev/null 2>/dev/null; then
                 echo -e "${RED}解码成功, 但 JSON 内容格式不正确.${NC}"; continue
             fi
             break
