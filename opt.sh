@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# wj - 节点优选生成器（语法修正最终版）
-# 主要改进：修复unbound variable错误，修复while循环语法错误，增强网络诊断
-# Usage: wj.sh [--online] [--proxy PROXY_URL] [--cache-dir DIR] [--out FILE]
-# Example: ./wj.sh --online --proxy socks5h://127.0.0.1:1080 --cache-dir ./cache --out new_links.txt
+# wj - 节点优选生成器（网络调试最终版）
+# 主要改进：增加调试功能，将从关键URL获取的内容保存到文件以供分析
 
 set -o errexit
 set -o pipefail
@@ -131,9 +129,23 @@ get_all_optimized_ips() {
     for url in "${OPTIMIZED_IP_URLS[@]}"; do
         echo -e "${YELLOW} > 正在尝试: $url${NC}"
         local html
+        
+        # 我们对所有URL都执行fetch，但只对目标URL进行特殊调试
         if ! html=$(fetch "$url"); then
+            # 即使fetch失败，如果是目标URL，我们仍要记录一下
+            if [[ "$url" == "https://api.uouin.com/cloudflare.html" ]]; then
+                 echo "DEBUG: fetch command for api.uouin.com failed." > debug_output.html
+            fi
             continue
         fi
+
+        # ⭐⭐ 调试代码核心 ⭐⭐
+        # 如果当前URL是我们关心的那个，就把抓取到的内容保存到文件
+        if [[ "$url" == "https://api.uouin.com/cloudflare.html" ]]; then
+            echo "$html" > debug_output.html
+            echo -e "${GREEN}   └ DEBUG: 已将从 api.uouin.com 收到的内容保存到 'debug_output.html' 文件中。${NC}"
+        fi
+        # ⭐⭐ 调试结束 ⭐⭐
 
         echo "$html" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' >> "$tmp" || true
 
@@ -181,7 +193,7 @@ main() {
 
     cat <<'BANNER'
 ==================================================
- 节点优选生成器 (wj) - 语法修正最终版
+ 节点优选生成器 (wj) - 网络调试最终版
  (离线优先，需联网请加 --online 或设置 --proxy)
  作者: byJoey (modified)
 ==================================================
@@ -222,8 +234,7 @@ BANNER
         fi
     else
         echo -e "${YELLOW}在 $url_file 中未找到有效节点.${NC}"
-        # ⭐⭐⭐ 这里是语法错误的修复点 ⭐⭐⭐
-        while true; do # <--- 之前这里缺少了 'do'
+        while true; do
             read -r -p "请手动粘贴一个 vmess:// 链接: " selected_url
             if [[ "$selected_url" != vmess://* ]]; then
                 echo -e "${RED}格式错误, 必须以 vmess:// 开头.${NC}"; continue
