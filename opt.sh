@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# wj - 节点优选生成器（网络调试最终版）
-# 主要改进：增加调试功能，将从关键URL获取的内容保存到文件以供分析
+# wj - 节点优选生成器（最终工作版）
+# 主要改进：针对特定网站的反爬虫策略，使用管道代替变量捕获来获取数据
 
 set -o errexit
 set -o pipefail
@@ -62,7 +62,7 @@ check_deps() {
     fi
 }
 
-# ---------- network fetch with cache and optional proxy ----------
+# ---------- network fetch (for normal sites) ----------
 fetch() {
     local url="$1"
     local cache_key
@@ -78,11 +78,8 @@ fetch() {
         return 1
     fi
 
-    local error_log; error_log=$(mktemp)
-    trap 'rm -f "$error_log"' RETURN
-
     local curl_args=(
-        --location --max-time 20 --connect-timeout 10 --retry 2 --retry-delay 3
+        --silent --show-error --fail --location --max-time 20 --connect-timeout 10 --retry 2 --retry-delay 3
         -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
     )
 
@@ -91,10 +88,8 @@ fetch() {
     fi
 
     local output
-    if ! output=$(curl --silent --show-error --fail "${curl_args[@]}" "$url" 2>"$error_log"); then
-        local curl_error
-        curl_error=$(<"$error_log")
-        echo -e "${RED}   └ 失败. 底层网络错误: ${curl_error}${NC}" >&2
+    if ! output=$(curl "${curl_args[@]}" "$url" 2>/dev/null); then
+        echo -e "${RED}   └ 失败: 网络请求失败.${NC}" >&2
         return 1
     fi
 
@@ -108,6 +103,30 @@ fetch() {
     echo -n "$output"
     return 0
 }
+
+# ⭐⭐⭐ 专门为有反爬虫的网站设计的特殊函数 ⭐⭐⭐
+fetch_and_parse_special() {
+    local url="$1"
+    local temp_file="$2"
+
+    local curl_args=(
+        --silent --show-error --fail --location --max-time 20 --connect-timeout 10 --retry 2 --retry-delay 3
+        -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
+    )
+
+    if [ -n "$PROXY" ]; then
+        curl_args+=(--proxy "$PROXY")
+    fi
+
+    # 使用管道直接处理，绕过反爬虫检测
+    if ! curl "${curl_args[@]}" "$url" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' >> "$temp_file"; then
+        echo -e "${RED}   └ 失败: 特殊网络请求失败.${NC}" >&2
+        return 1
+    fi
+
+    return 0
+}
+
 
 # ---------- parse optimized lists (robust) ----------
 get_all_optimized_ips() {
@@ -128,26 +147,19 @@ get_all_optimized_ips() {
 
     for url in "${OPTIMIZED_IP_URLS[@]}"; do
         echo -e "${YELLOW} > 正在尝试: $url${NC}"
-        local html
         
-        # 我们对所有URL都执行fetch，但只对目标URL进行特殊调试
-        if ! html=$(fetch "$url"); then
-            # 即使fetch失败，如果是目标URL，我们仍要记录一下
-            if [[ "$url" == "https://api.uouin.com/cloudflare.html" ]]; then
-                 echo "DEBUG: fetch command for api.uouin.com failed." > debug_output.html
-            fi
-            continue
-        fi
-
-        # ⭐⭐ 调试代码核心 ⭐⭐
-        # 如果当前URL是我们关心的那个，就把抓取到的内容保存到文件
+        # ⭐⭐⭐ 根据URL选择不同的处理方式 ⭐⭐⭐
         if [[ "$url" == "https://api.uouin.com/cloudflare.html" ]]; then
-            echo "$html" > debug_output.html
-            echo -e "${GREEN}   └ DEBUG: 已将从 api.uouin.com 收到的内容保存到 'debug_output.html' 文件中。${NC}"
+            # 对特殊网站使用特殊函数
+            fetch_and_parse_special "$url" "$tmp"
+        else
+            # 对普通网站使用常规函数
+            local html
+            if ! html=$(fetch "$url"); then
+                continue
+            fi
+            echo "$html" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' >> "$tmp" || true
         fi
-        # ⭐⭐ 调试结束 ⭐⭐
-
-        echo "$html" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' >> "$tmp" || true
 
         if [ -s "$tmp" ]; then
             awk '{$1=$1};1' "$tmp" | sort -u | shuf > "${tmp}_uniq" || true
@@ -157,13 +169,12 @@ get_all_optimized_ips() {
                 break
             fi
         else
-            >"$tmp"
             echo -e "${RED}   └ 失败: 未能在此来源中解析出任何IP地址.${NC}"
         fi
     done
 
     if [ "${#ip_list[@]}" -eq 0 ]; then
-        echo -e "${RED}错误: 尝试了所有来源，但均未能成功解析出优选 IP 地址。请再次检查您的网络环境（DNS、防火墙或是否需要代理）。${NC}"
+        echo -e "${RED}错误: 尝试了所有来源，但均未能成功解析出优选 IP 地址。${NC}"
         return 1
     fi
 
@@ -193,7 +204,7 @@ main() {
 
     cat <<'BANNER'
 ==================================================
- 节点优选生成器 (wj) - 网络调试最终版
+ 节点优选生成器 (wj) - 最终工作版
  (离线优先，需联网请加 --online 或设置 --proxy)
  作者: byJoey (modified)
 ==================================================
