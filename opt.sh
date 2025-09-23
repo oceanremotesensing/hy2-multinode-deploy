@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wj - 节点优选生成器（最终修复版）
+# wj - 节点优选生成器（最终修复版 v2）
 # 主要改进：修复unbound variable错误，增强网络容错与错误诊断，模拟浏览器请求
 # Usage: wj.sh [--online] [--proxy PROXY_URL] [--cache-dir DIR] [--out FILE]
 # Example: ./wj.sh --online --proxy socks5h://127.0.0.1:1080 --cache-dir ./cache --out new_links.txt
@@ -112,7 +112,6 @@ fetch() {
 }
 
 # ---------- parse optimized lists (robust) ----------
-# ⭐⭐⭐ 函数已修改 - 增加了对 ip_list 的预声明以防止崩溃 ⭐⭐⭐
 get_all_optimized_ips() {
     declare -a OPTIMIZED_IP_URLS
     OPTIMIZED_IP_URLS=(
@@ -151,7 +150,6 @@ get_all_optimized_ips() {
         fi
     done
 
-    # 经过修复后，即使所有源都失败，这里的判断也会正常执行
     if [ "${#ip_list[@]}" -eq 0 ]; then
         echo -e "${RED}错误: 尝试了所有来源，但均未能成功解析出优选 IP 地址。请再次检查您的网络环境（DNS、防火墙或是否需要代理）。${NC}"
         return 1
@@ -183,7 +181,7 @@ main() {
 
     cat <<'BANNER'
 ==================================================
- 节点优选生成器 (wj) - 最终修复版
+ 节点优选生成器 (wj) - 最终修复版 v2
  (离线优先，需联网请加 --online 或设置 --proxy)
  作者: byJoey (modified)
 ==================================================
@@ -255,8 +253,8 @@ BANNER
 
     local ip_source_choice; local use_optimized_ips=false
     while true; do
-        read -r -p "请输入选项编号 (1-3): " ip_source_choice
-        case "$ip_source_choice" in
+        read -r -p "请输入选项编号 (1-3): " choice
+        case "$choice" in
             1)
                 if [ "$USE_NETWORK" != true ]; then
                     echo -e "${RED}当前为离线模式（未启用 --online），无法获取 Cloudflare 列表。请启用 --online 或准备本地缓存.${NC}"
@@ -275,7 +273,6 @@ BANNER
                     use_optimized_ips=true
                     break
                 else
-                    # 当get_all_optimized_ips返回失败时，再次循环让用户选择
                     continue
                 fi
                 ;;
