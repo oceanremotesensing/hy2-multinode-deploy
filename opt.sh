@@ -99,44 +99,36 @@ fetch() {
 }
 
 # ---------- parse optimized lists (robust) ----------
+# ⭐⭐⭐ 函数已修改以使用新的URL和更通用的解析方法 ⭐⭐⭐
 get_all_optimized_ips() {
-    local url_v4="https://www.wetest.vip/page/cloudflare/address_v4.html"
-    local url_v6="https://www.wetest.vip/page/cloudfront/address_v6.html"
+    # 使用您提供的新URL
+    local url_optimized="https://api.uouin.com/cloudflare.html"
 
-    echo -e "${YELLOW}正在合并获取所有优选 IP (IPv4 & IPv6)...${NC}"
+    echo -e "${YELLOW}正在从 $url_optimized 获取优选 IP...${NC}"
 
     local tmp; tmp="$(mktemp)"
     trap 'rm -f "$tmp"' RETURN
 
     parse_url_contents() {
         local html="$1"
-        # try to extract rows with data-label attributes; fallback to basic IPv4 regex
         if [ -z "$html" ]; then
             return 1
         fi
-        # extract lines containing the '优选地址' label or basic ip-like tokens
-        echo "$html" | tr '\n' ' ' \
-            | sed 's/<tr>/\n<tr>/g' \
-            | grep -oP 'data-label="优选地址">[^<]+' 2>/dev/null \
-            | sed -E 's/.*data-label="优选地址">([^<]+).*/\1/' \
-            >> "$tmp" || true
-
-        # also try to fallback with simple IP regex
-        echo "$html" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' 2>/dev/null >> "$tmp" || true
+        # 使用一个通用的正则表达式来提取所有看起来像IPv4地址或CIDR的字符串
+        # 这种方法比解析特定的HTML标签更可靠
+        echo "$html" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' >> "$tmp" || true
     }
 
     local html
-    html=$(fetch "$url_v4") || html=""
-    parse_url_contents "$html"
-    html=$(fetch "$url_v6") || html=""
+    html=$(fetch "$url_optimized") || html=""
     parse_url_contents "$html"
 
-    # dedupe and shuffle
+    # 去重并随机排序
     awk '{$1=$1};1' "$tmp" | sort -u | shuf > "${tmp}_uniq" || true
     mapfile -t ip_list < "${tmp}_uniq" || true
 
     if [ "${#ip_list[@]}" -eq 0 ]; then
-        echo -e "${RED}无法从任何来源解析出优选 IP 地址（请准备本地缓存或启用 --online）.${NC}"
+        echo -e "${RED}无法从 $url_optimized 解析出优选 IP 地址（请准备本地缓存或启用 --online）.${NC}"
         return 1
     fi
 
@@ -236,14 +228,15 @@ BANNER
 
     echo -e "${YELLOW}请选择要使用的 IP 地址来源:${NC}"
     echo "  1) Cloudflare 官方 (需联网)"
-    echo "  2) 云优选（w etest）(需联网或准备缓存)"
+    # ⭐⭐⭐ 这里的提示文本已更新 ⭐⭐⭐
+    echo "  2) 第三方优选IP (uouin.com) (需联网或准备缓存)"
     echo "  3) 本地缓存/离线模式（优先）"
 
     local ip_source_choice; local use_optimized_ips=false
     while true; do
         read -r -p "请输入选项编号 (1-3): " ip_source_choice
         case "$ip_source_choice" in
-            1) 
+            1)
                 # Cloudflare 官方
                 if [ "$USE_NETWORK" != true ]; then
                     echo -e "${RED}当前为离线模式（未启用 --online），无法获取 Cloudflare 列表。请启用 --online 或准备本地缓存.${NC}"
@@ -258,7 +251,7 @@ BANNER
                 break
                 ;;
             2)
-                # 云优选（采用 get_all_optimized_ips）
+                # 第三方优选IP（采用 get_all_optimized_ips）
                 if get_all_optimized_ips; then
                     use_optimized_ips=true
                     break
