@@ -145,7 +145,6 @@ get_all_optimized_ips() {
                 break
             fi
         else
-            # 清空tmp文件，以免影响下一次循环
             >"$tmp"
             echo -e "${RED}   └ 失败: 未能在此来源中解析出任何IP地址.${NC}"
         fi
