@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# wj - 节点优选生成器（改进版）
-# 主要改进：默认离线/本地缓存优先、支持 --online/--proxy、改进错误处理、避免默认把 VPS IP 直接暴露
+# wj - 节点优选生成器（最终改进版）
+# 主要改进：增强网络容错与错误诊断，模拟浏览器请求，自动尝试多个国内镜像源
 # Usage: wj.sh [--online] [--proxy PROXY_URL] [--cache-dir DIR] [--out FILE]
 # Example: ./wj.sh --online --proxy socks5h://127.0.0.1:1080 --cache-dir ./cache --out new_links.txt
 
@@ -65,33 +65,56 @@ check_deps() {
 }
 
 # ---------- network fetch with cache and optional proxy ----------
-# fetch URL: return content or empty string on failure
+# ⭐⭐⭐ 函数已大幅修改 - 增强了网络功能并能报告详细的底层错误 ⭐⭐⭐
 fetch() {
     local url="$1"
     local cache_key
     cache_key="$(echo -n "$url" | sed 's/[^a-zA-Z0-9]/_/g')"
     local cache_file="$CACHE_DIR/$cache_key"
-    if [ -f "$cache_file" ]; then
+
+    if [ -f "$cache_file" ] && [ -s "$cache_file" ]; then
         cat "$cache_file"
         return 0
     fi
 
     if [ "$USE_NETWORK" != true ]; then
-        # offline and no cache
         return 1
     fi
 
-    # build curl args
-    local curl_args=(--silent --show-error --location --max-time 10)
+    local error_log; error_log=$(mktemp)
+    trap 'rm -f "$error_log"' RETURN
+
+    # 更强大的 curl 参数: 模拟浏览器, 增加超时和重试
+    local curl_args=(
+        --location          # 自动跟随跳转
+        --max-time 20       # 最长总执行时间20秒
+        --connect-timeout 10 # 连接超时10秒
+        --retry 2           # 对瞬时错误重试2次
+        --retry-delay 3     # 每次重试间隔3秒
+        -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36" # 模拟浏览器UA
+    )
+
     if [ -n "$PROXY" ]; then
         curl_args+=(--proxy "$PROXY")
     fi
 
-    if ! output=$(curl "${curl_args[@]}" "$url" 2>/dev/null); then
+    local output
+    # 执行curl，将标准错误输出到临时日志文件
+    if ! output=$(curl --silent --show-error --fail "${curl_args[@]}" "$url" 2>"$error_log"); then
+        # 如果失败，读取临时日志中的具体错误信息并显示给用户
+        local curl_error
+        curl_error=$(<"$error_log")
+        # 将错误信息输出到标准错误流
+        echo -e "${RED}   └ 失败. 底层网络错误: ${curl_error}${NC}" >&2
         return 1
     fi
 
-    # ensure cache dir exists
+    # 检查连接成功但返回内容为空的情况
+    if [ -z "$output" ]; then
+        echo -e "${RED}   └ 失败: 连接成功但服务器返回内容为空.${NC}" >&2
+        return 1
+    fi
+
     mkdir -p "$CACHE_DIR"
     printf "%s" "$output" > "$cache_file"
     echo -n "$output"
@@ -99,15 +122,14 @@ fetch() {
 }
 
 # ---------- parse optimized lists (robust) ----------
-# ⭐⭐⭐ 函数已修改 - 增加了多个备用IP来源并会自动尝试 ⭐⭐⭐
 get_all_optimized_ips() {
-    # 内置多个优选IP来源，会自动依次尝试
+    # 优先使用国内代码托管平台或CDN的镜像，提高访问成功率
     declare -a OPTIMIZED_IP_URLS
     OPTIMIZED_IP_URLS=(
+        "https://raw.gitmirror.com/badafans/better-cloudflare-ip/master/ip.txt"
+        "https://cdn.jsdelivr.net/gh/badafans/better-cloudflare-ip@master/ip.txt"
         "https://api.uouin.com/cloudflare.html"
-        "https://raw.githubusercontent.com/badafans/better-cloudflare-ip/master/ip.txt"
-        "https://raw.githubusercontent.com/badafans/better-cloudflare-ip/master/cloudflare/ip.txt"
-        "https://zip.baipiao.eu.org/"
+        "https://gcore.jsdelivr.net/gh/badafans/better-cloudflare-ip@master/ip.txt"
     )
 
     echo -e "${YELLOW}正在尝试从多个来源获取优选 IP...${NC}"
@@ -117,26 +139,19 @@ get_all_optimized_ips() {
 
     for url in "${OPTIMIZED_IP_URLS[@]}"; do
         echo -e "${YELLOW} > 正在尝试: $url${NC}"
-        # 获取内容
         local html
-        html=$(fetch "$url") || html=""
-        if [ -z "$html" ]; then
-            echo -e "${RED}   └ 失败: 无法获取内容或内容为空.${NC}"
+        # 新的 fetch 函数会自己打印详细错误, 这里只需判断是否成功
+        if ! html=$(fetch "$url"); then
             continue
         fi
 
-        # 使用一个通用的正则表达式来提取所有看起来像IPv4地址或CIDR的字符串
         echo "$html" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' >> "$tmp" || true
 
-        # 检查是否成功提取到IP
         if [ -s "$tmp" ]; then
-             # 去重并随机排序
             awk '{$1=$1};1' "$tmp" | sort -u | shuf > "${tmp}_uniq" || true
             mapfile -t ip_list < "${tmp}_uniq" || true
-
             if [ "${#ip_list[@]}" -gt 0 ]; then
                 echo -e "${GREEN}   └ 成功: 获取到 ${#ip_list[@]} 条候选 IP.${NC}"
-                # 成功获取后就跳出循环
                 break
             fi
         else
@@ -157,11 +172,9 @@ get_all_optimized_ips() {
 # ---------- helper: is_ip_or_cidr ----------
 is_ip_or_cidr() {
     local val="$1"
-    # simple check for IPv4 or CIDR; more strict validation can be added
     if [[ "$val" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
         return 0
     fi
-    # accept IPv6-ish tokens as fallback
     if [[ "$val" =~ : ]]; then
         return 0
     fi
@@ -177,7 +190,7 @@ main() {
 
     cat <<'BANNER'
 ==================================================
- 节点优选生成器 (wj) - 改进版
+ 节点优选生成器 (wj) - 最终改进版
  (离线优先，需联网请加 --online 或设置 --proxy)
  作者: byJoey (modified)
 ==================================================
@@ -186,7 +199,6 @@ BANNER
     if [ -f "$url_file" ]; then
         mapfile -t urls < "$url_file"
         for url in "${urls[@]}"; do
-            # 忽略空行或注释
             [[ -z "$url" || "$url" =~ ^# ]] && continue
             decoded_json=$(echo "${url#vmess://}" | base64 -d 2>/dev/null || true)
             if [ -n "$decoded_json" ]; then
@@ -235,7 +247,6 @@ BANNER
         done
     fi
 
-    # 解析原始 JSON
     local base64_part="${selected_url#vmess://}"
     local original_json
     original_json=$(echo "$base64_part" | base64 -d)
@@ -254,7 +265,6 @@ BANNER
         read -r -p "请输入选项编号 (1-3): " ip_source_choice
         case "$ip_source_choice" in
             1)
-                # Cloudflare 官方
                 if [ "$USE_NETWORK" != true ]; then
                     echo -e "${RED}当前为离线模式（未启用 --online），无法获取 Cloudflare 列表。请启用 --online 或准备本地缓存.${NC}"
                     continue
@@ -268,7 +278,6 @@ BANNER
                 break
                 ;;
             2)
-                # 第三方优选IP（采用 get_all_optimized_ips）
                 if get_all_optimized_ips; then
                     use_optimized_ips=true
                     break
@@ -277,7 +286,6 @@ BANNER
                 fi
                 ;;
             3)
-                # 本地缓存
                 if [ ! -d "$CACHE_DIR" ]; then
                     echo -e "${RED}缓存目录 $CACHE_DIR 不存在. 请把候选 IP 保存为文件放在该目录下 (每行一个 IP/CIDR).${NC}"
                     continue
@@ -361,7 +369,6 @@ do_install() {
     exit 0
 }
 
-# if user asked install, do it and exit
 if [[ "${INSTALL_AFTER:-}" == "1" ]]; then
     do_install
 fi
