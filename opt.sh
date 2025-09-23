@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# wj - 节点优选生成器（最终工作版）
-# 主要改进：针对特定网站的反爬虫策略，使用管道代替变量捕获来获取数据
+# wj - 节点优选生成器（最终作用域修复版）
+# 主要改进：修复函数变量作用域问题，确保IP列表能被主函数正确接收
 
 set -o errexit
 set -o pipefail
@@ -104,7 +104,7 @@ fetch() {
     return 0
 }
 
-# ⭐⭐⭐ 专门为有反爬虫的网站设计的特殊函数 ⭐⭐⭐
+# ---------- special fetcher for anti-bot sites ----------
 fetch_and_parse_special() {
     local url="$1"
     local temp_file="$2"
@@ -118,7 +118,6 @@ fetch_and_parse_special() {
         curl_args+=(--proxy "$PROXY")
     fi
 
-    # 使用管道直接处理，绕过反爬虫检测
     if ! curl "${curl_args[@]}" "$url" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' >> "$temp_file"; then
         echo -e "${RED}   └ 失败: 特殊网络请求失败.${NC}" >&2
         return 1
@@ -129,6 +128,7 @@ fetch_and_parse_special() {
 
 
 # ---------- parse optimized lists (robust) ----------
+# ⭐⭐⭐ 函数已修改: 将所有状态消息输出到 stderr, 将最终结果输出到 stdout ⭐⭐⭐
 get_all_optimized_ips() {
     declare -a OPTIMIZED_IP_URLS
     OPTIMIZED_IP_URLS=(
@@ -138,22 +138,22 @@ get_all_optimized_ips() {
         "https://gcore.jsdelivr.net/gh/badafans/better-cloudflare-ip@master/ip.txt"
     )
 
-    echo -e "${YELLOW}正在尝试从多个来源获取优选 IP...${NC}"
+    echo -e "${YELLOW}正在尝试从多个来源获取优选 IP...${NC}" >&2
 
     local tmp; tmp="$(mktemp)"
-    trap 'rm -f "$tmp"' RETURN
+    # 使用 trap 确保临时文件在函数退出时被删除
+    trap 'rm -f "$tmp" "${tmp}_uniq"' RETURN
     
-    declare -a ip_list=()
-
+    local found_ips=false
     for url in "${OPTIMIZED_IP_URLS[@]}"; do
-        echo -e "${YELLOW} > 正在尝试: $url${NC}"
+        echo -e "${YELLOW} > 正在尝试: $url${NC}" >&2
         
-        # ⭐⭐⭐ 根据URL选择不同的处理方式 ⭐⭐⭐
+        # 清空临时文件以进行下一次尝试
+        >"$tmp"
+        
         if [[ "$url" == "https://api.uouin.com/cloudflare.html" ]]; then
-            # 对特殊网站使用特殊函数
             fetch_and_parse_special "$url" "$tmp"
         else
-            # 对普通网站使用常规函数
             local html
             if ! html=$(fetch "$url"); then
                 continue
@@ -162,23 +162,23 @@ get_all_optimized_ips() {
         fi
 
         if [ -s "$tmp" ]; then
-            awk '{$1=$1};1' "$tmp" | sort -u | shuf > "${tmp}_uniq" || true
-            mapfile -t ip_list < "${tmp}_uniq" || true
-            if [ "${#ip_list[@]}" -gt 0 ]; then
-                echo -e "${GREEN}   └ 成功: 获取到 ${#ip_list[@]} 条候选 IP.${NC}"
-                break
-            fi
+            local count
+            count=$(wc -l < "$tmp")
+            echo -e "${GREEN}   └ 成功: 获取到 ${count// /} 条候选 IP.${NC}" >&2
+            found_ips=true
+            break
         else
-            echo -e "${RED}   └ 失败: 未能在此来源中解析出任何IP地址.${NC}"
+            echo -e "${RED}   └ 失败: 未能在此来源中解析出任何IP地址.${NC}" >&2
         fi
     done
 
-    if [ "${#ip_list[@]}" -eq 0 ]; then
-        echo -e "${RED}错误: 尝试了所有来源，但均未能成功解析出优选 IP 地址。${NC}"
+    if ! $found_ips; then
+        echo -e "${RED}错误: 尝试了所有来源，但均未能成功解析出优选 IP 地址。${NC}" >&2
         return 1
     fi
-
-    echo -e "${GREEN}最终成功获取 ${#ip_list[@]} 条候选 IP（已去重与随机化）。${NC}"
+    
+    # 将最终结果去重、打乱并输出到 stdout
+    awk '{$1=$1};1' "$tmp" | sort -u | shuf
     return 0
 }
 
@@ -274,7 +274,10 @@ BANNER
     echo "  2) 第三方优选IP (自动尝试多个来源, 推荐)"
     echo "  3) 本地缓存/离线模式（优先）"
 
-    local ip_source_choice; local use_optimized_ips=false
+    # 预先声明，确保变量存在
+    declare -a ip_list=()
+    local use_optimized_ips=false
+    
     while true; do
         read -r -p "请输入选项编号 (1-3): " choice
         case "$choice" in
@@ -283,6 +286,7 @@ BANNER
                     echo -e "${RED}当前为离线模式（未启用 --online），无法获取 Cloudflare 列表。请启用 --online 或准备本地缓存.${NC}"
                     continue
                 fi
+                local cloudflare_ips
                 cloudflare_ips=$(fetch "https://www.cloudflare.com/ips-v4") || cloudflare_ips=""
                 if [ -z "$cloudflare_ips" ]; then
                     echo -e "${RED}无法获取 Cloudflare IP 列表.${NC}"
@@ -292,10 +296,16 @@ BANNER
                 break
                 ;;
             2)
-                if get_all_optimized_ips; then
+                # ⭐⭐⭐ 这里是核心修复: 从函数的 stdout 捕获IP列表 ⭐⭐⭐
+                local ip_list_output
+                ip_list_output=$(get_all_optimized_ips)
+                if [ -n "$ip_list_output" ]; then
+                    mapfile -t ip_list <<< "$ip_list_output"
                     use_optimized_ips=true
+                    echo -e "${GREEN}最终成功获取 ${#ip_list[@]} 条候选 IP。${NC}"
                     break
                 else
+                    echo -e "${RED}获取优选IP失败, 请重新选择或检查网络.${NC}"
                     continue
                 fi
                 ;;
@@ -334,10 +344,11 @@ BANNER
 
     local out_buf=""
     for ((i=0; i<num_to_generate; i++)); do
+        local current_ip
         if [ "$use_optimized_ips" = true ]; then
             current_ip="${ip_list[$i]}"
         else
-            idx=$((RANDOM % ${#ip_list[@]}))
+            local idx=$((RANDOM % ${#ip_list[@]}))
             current_ip="${ip_list[$idx]}"
         fi
         
@@ -346,16 +357,19 @@ BANNER
             continue
         fi
         
-        ip_for_add="${current_ip%%/*}"
-        new_ps="${original_ps}-优选"
+        local ip_for_add="${current_ip%%/*}"
+        local new_ps="${original_ps}-优选"
         
         if [[ "$current_ip" =~ [[:space:]] ]]; then
             ip_for_add=$(echo "$current_ip" | awk '{print $1}')
+            local isp_name
             isp_name=$(echo "$current_ip" | cut -d' ' -f2-)
             new_ps="${original_ps}-优选${isp_name}"
         fi
         
+        local modified_json
         modified_json=$(echo "$original_json" | jq --arg new_add "$ip_for_add" --arg new_ps "$new_ps" '.add = $new_add | .ps = $new_ps')
+        local new_base64
         new_base64=$(printf "%s" "$modified_json" | base64 | tr -d '\n')
         out_buf+=$'vmess://'"$new_base64"$'\n'
     done
@@ -366,7 +380,9 @@ BANNER
     else
         echo -e "${YELLOW}生成的新节点链接如下:${NC}"
         printf "%s" "$out_buf"
-        echo -e "${GREEN}共生成约 ${num_to_generate} 个链接（实际可能略少，因过滤/跳过）.${NC}"
+        local final_count
+        final_count=$(echo "$out_buf" | wc -l)
+        echo -e "${GREEN}共生成 ${final_count// /} 个链接。${NC}"
     fi
 }
 
