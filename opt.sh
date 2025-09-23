@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# wj - 节点优选生成器（最终修复版 v2）
-# 主要改进：修复unbound variable错误，增强网络容错与错误诊断，模拟浏览器请求
+# wj - 节点优选生成器（语法修正最终版）
+# 主要改进：修复unbound variable错误，修复while循环语法错误，增强网络诊断
 # Usage: wj.sh [--online] [--proxy PROXY_URL] [--cache-dir DIR] [--out FILE]
 # Example: ./wj.sh --online --proxy socks5h://127.0.0.1:1080 --cache-dir ./cache --out new_links.txt
 
@@ -126,7 +126,6 @@ get_all_optimized_ips() {
     local tmp; tmp="$(mktemp)"
     trap 'rm -f "$tmp"' RETURN
     
-    # 关键修复：预先声明ip_list为空数组，防止在所有源都失败时出现 "unbound variable" 错误
     declare -a ip_list=()
 
     for url in "${OPTIMIZED_IP_URLS[@]}"; do
@@ -146,6 +145,8 @@ get_all_optimized_ips() {
                 break
             fi
         else
+            # 清空tmp文件，以免影响下一次循环
+            >"$tmp"
             echo -e "${RED}   └ 失败: 未能在此来源中解析出任何IP地址.${NC}"
         fi
     done
@@ -181,7 +182,7 @@ main() {
 
     cat <<'BANNER'
 ==================================================
- 节点优选生成器 (wj) - 最终修复版 v2
+ 节点优选生成器 (wj) - 语法修正最终版
  (离线优先，需联网请加 --online 或设置 --proxy)
  作者: byJoey (modified)
 ==================================================
@@ -222,7 +223,8 @@ BANNER
         fi
     else
         echo -e "${YELLOW}在 $url_file 中未找到有效节点.${NC}"
-        while true;
+        # ⭐⭐⭐ 这里是语法错误的修复点 ⭐⭐⭐
+        while true; do # <--- 之前这里缺少了 'do'
             read -r -p "请手动粘贴一个 vmess:// 链接: " selected_url
             if [[ "$selected_url" != vmess://* ]]; then
                 echo -e "${RED}格式错误, 必须以 vmess:// 开头.${NC}"; continue
@@ -231,7 +233,7 @@ BANNER
             if [ -z "$decoded_json" ]; then
                 echo -e "${RED}无法解码链接, 请检查链接是否完整有效.${NC}"; continue
             fi
-            if ! echo "$decoded_json" | jq -e .ps >/dev/null 2>/dev/null; then
+            if ! echo "$decoded_json" | jq -e .ps >/dev/null 2>&1; then
                 echo -e "${RED}解码成功, 但 JSON 内容格式不正确.${NC}"; continue
             fi
             break
