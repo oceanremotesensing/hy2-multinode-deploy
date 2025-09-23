@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# wj - 节点优选生成器（最终改进版）
-# 主要改进：增强网络容错与错误诊断，模拟浏览器请求，自动尝试多个国内镜像源
+# wj - 节点优选生成器（最终修复版）
+# 主要改进：修复unbound variable错误，增强网络容错与错误诊断，模拟浏览器请求
 # Usage: wj.sh [--online] [--proxy PROXY_URL] [--cache-dir DIR] [--out FILE]
 # Example: ./wj.sh --online --proxy socks5h://127.0.0.1:1080 --cache-dir ./cache --out new_links.txt
 
@@ -65,7 +65,6 @@ check_deps() {
 }
 
 # ---------- network fetch with cache and optional proxy ----------
-# ⭐⭐⭐ 函数已大幅修改 - 增强了网络功能并能报告详细的底层错误 ⭐⭐⭐
 fetch() {
     local url="$1"
     local cache_key
@@ -84,14 +83,9 @@ fetch() {
     local error_log; error_log=$(mktemp)
     trap 'rm -f "$error_log"' RETURN
 
-    # 更强大的 curl 参数: 模拟浏览器, 增加超时和重试
     local curl_args=(
-        --location          # 自动跟随跳转
-        --max-time 20       # 最长总执行时间20秒
-        --connect-timeout 10 # 连接超时10秒
-        --retry 2           # 对瞬时错误重试2次
-        --retry-delay 3     # 每次重试间隔3秒
-        -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36" # 模拟浏览器UA
+        --location --max-time 20 --connect-timeout 10 --retry 2 --retry-delay 3
+        -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
     )
 
     if [ -n "$PROXY" ]; then
@@ -99,17 +93,13 @@ fetch() {
     fi
 
     local output
-    # 执行curl，将标准错误输出到临时日志文件
     if ! output=$(curl --silent --show-error --fail "${curl_args[@]}" "$url" 2>"$error_log"); then
-        # 如果失败，读取临时日志中的具体错误信息并显示给用户
         local curl_error
         curl_error=$(<"$error_log")
-        # 将错误信息输出到标准错误流
         echo -e "${RED}   └ 失败. 底层网络错误: ${curl_error}${NC}" >&2
         return 1
     fi
 
-    # 检查连接成功但返回内容为空的情况
     if [ -z "$output" ]; then
         echo -e "${RED}   └ 失败: 连接成功但服务器返回内容为空.${NC}" >&2
         return 1
@@ -122,8 +112,8 @@ fetch() {
 }
 
 # ---------- parse optimized lists (robust) ----------
+# ⭐⭐⭐ 函数已修改 - 增加了对 ip_list 的预声明以防止崩溃 ⭐⭐⭐
 get_all_optimized_ips() {
-    # 优先使用国内代码托管平台或CDN的镜像，提高访问成功率
     declare -a OPTIMIZED_IP_URLS
     OPTIMIZED_IP_URLS=(
         "https://raw.gitmirror.com/badafans/better-cloudflare-ip/master/ip.txt"
@@ -136,11 +126,13 @@ get_all_optimized_ips() {
 
     local tmp; tmp="$(mktemp)"
     trap 'rm -f "$tmp"' RETURN
+    
+    # 关键修复：预先声明ip_list为空数组，防止在所有源都失败时出现 "unbound variable" 错误
+    declare -a ip_list=()
 
     for url in "${OPTIMIZED_IP_URLS[@]}"; do
         echo -e "${YELLOW} > 正在尝试: $url${NC}"
         local html
-        # 新的 fetch 函数会自己打印详细错误, 这里只需判断是否成功
         if ! html=$(fetch "$url"); then
             continue
         fi
@@ -159,8 +151,9 @@ get_all_optimized_ips() {
         fi
     done
 
+    # 经过修复后，即使所有源都失败，这里的判断也会正常执行
     if [ "${#ip_list[@]}" -eq 0 ]; then
-        echo -e "${RED}错误: 尝试了所有来源，但均未能成功解析出优选 IP 地址。请检查网络或更新脚本中的IP来源列表.${NC}"
+        echo -e "${RED}错误: 尝试了所有来源，但均未能成功解析出优选 IP 地址。请再次检查您的网络环境（DNS、防火墙或是否需要代理）。${NC}"
         return 1
     fi
 
@@ -190,7 +183,7 @@ main() {
 
     cat <<'BANNER'
 ==================================================
- 节点优选生成器 (wj) - 最终改进版
+ 节点优选生成器 (wj) - 最终修复版
  (离线优先，需联网请加 --online 或设置 --proxy)
  作者: byJoey (modified)
 ==================================================
@@ -282,6 +275,7 @@ BANNER
                     use_optimized_ips=true
                     break
                 else
+                    # 当get_all_optimized_ips返回失败时，再次循环让用户选择
                     continue
                 fi
                 ;;
