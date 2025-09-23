@@ -99,42 +99,60 @@ fetch() {
 }
 
 # ---------- parse optimized lists (robust) ----------
-# ⭐⭐⭐ 函数已修改以使用新的URL和更通用的解析方法 ⭐⭐⭐
+# ⭐⭐⭐ 函数已修改 - 增加了多个备用IP来源并会自动尝试 ⭐⭐⭐
 get_all_optimized_ips() {
-    # 使用您提供的新URL
-    local url_optimized="https://api.uouin.com/cloudflare.html"
+    # 内置多个优选IP来源，会自动依次尝试
+    declare -a OPTIMIZED_IP_URLS
+    OPTIMIZED_IP_URLS=(
+        "https://api.uouin.com/cloudflare.html"
+        "https://raw.githubusercontent.com/badafans/better-cloudflare-ip/master/ip.txt"
+        "https://raw.githubusercontent.com/badafans/better-cloudflare-ip/master/cloudflare/ip.txt"
+        "https://zip.baipiao.eu.org/"
+    )
 
-    echo -e "${YELLOW}正在从 $url_optimized 获取优选 IP...${NC}"
+    echo -e "${YELLOW}正在尝试从多个来源获取优选 IP...${NC}"
 
     local tmp; tmp="$(mktemp)"
     trap 'rm -f "$tmp"' RETURN
 
-    parse_url_contents() {
-        local html="$1"
+    for url in "${OPTIMIZED_IP_URLS[@]}"; do
+        echo -e "${YELLOW} > 正在尝试: $url${NC}"
+        # 获取内容
+        local html
+        html=$(fetch "$url") || html=""
         if [ -z "$html" ]; then
-            return 1
+            echo -e "${RED}   └ 失败: 无法获取内容或内容为空.${NC}"
+            continue
         fi
+
         # 使用一个通用的正则表达式来提取所有看起来像IPv4地址或CIDR的字符串
-        # 这种方法比解析特定的HTML标签更可靠
         echo "$html" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' >> "$tmp" || true
-    }
 
-    local html
-    html=$(fetch "$url_optimized") || html=""
-    parse_url_contents "$html"
+        # 检查是否成功提取到IP
+        if [ -s "$tmp" ]; then
+             # 去重并随机排序
+            awk '{$1=$1};1' "$tmp" | sort -u | shuf > "${tmp}_uniq" || true
+            mapfile -t ip_list < "${tmp}_uniq" || true
 
-    # 去重并随机排序
-    awk '{$1=$1};1' "$tmp" | sort -u | shuf > "${tmp}_uniq" || true
-    mapfile -t ip_list < "${tmp}_uniq" || true
+            if [ "${#ip_list[@]}" -gt 0 ]; then
+                echo -e "${GREEN}   └ 成功: 获取到 ${#ip_list[@]} 条候选 IP.${NC}"
+                # 成功获取后就跳出循环
+                break
+            fi
+        else
+            echo -e "${RED}   └ 失败: 未能在此来源中解析出任何IP地址.${NC}"
+        fi
+    done
 
     if [ "${#ip_list[@]}" -eq 0 ]; then
-        echo -e "${RED}无法从 $url_optimized 解析出优选 IP 地址（请准备本地缓存或启用 --online）.${NC}"
+        echo -e "${RED}错误: 尝试了所有来源，但均未能成功解析出优选 IP 地址。请检查网络或更新脚本中的IP来源列表.${NC}"
         return 1
     fi
 
-    echo -e "${GREEN}成功获取 ${#ip_list[@]} 条候选 IP（已去重与随机化）。${NC}"
+    echo -e "${GREEN}最终成功获取 ${#ip_list[@]} 条候选 IP（已去重与随机化）。${NC}"
     return 0
 }
+
 
 # ---------- helper: is_ip_or_cidr ----------
 is_ip_or_cidr() {
@@ -228,8 +246,7 @@ BANNER
 
     echo -e "${YELLOW}请选择要使用的 IP 地址来源:${NC}"
     echo "  1) Cloudflare 官方 (需联网)"
-    # ⭐⭐⭐ 这里的提示文本已更新 ⭐⭐⭐
-    echo "  2) 第三方优选IP (uouin.com) (需联网或准备缓存)"
+    echo "  2) 第三方优选IP (自动尝试多个来源, 推荐)"
     echo "  3) 本地缓存/离线模式（优先）"
 
     local ip_source_choice; local use_optimized_ips=false
@@ -261,7 +278,6 @@ BANNER
                 ;;
             3)
                 # 本地缓存
-                # try to read cache dir files
                 if [ ! -d "$CACHE_DIR" ]; then
                     echo -e "${RED}缓存目录 $CACHE_DIR 不存在. 请把候选 IP 保存为文件放在该目录下 (每行一个 IP/CIDR).${NC}"
                     continue
@@ -278,13 +294,11 @@ BANNER
         esac
     done
 
-    # 当使用云优选时 ip_list 已由 get_all_optimized_ips 填充
     if [ "${#ip_list[@]}" -eq 0 ]; then
         echo -e "${RED}未获取到任何 IP，退出.${NC}"
         exit 1
     fi
 
-    # 生成数量（若是 Cloudflare 或 本地需要用户输入数量）
     local num_to_generate=0
     if [ "$use_optimized_ips" = true ]; then
         num_to_generate=${#ip_list[@]}
@@ -296,37 +310,34 @@ BANNER
         done
     fi
 
-    # 输出容器
     local out_buf=""
     for ((i=0; i<num_to_generate; i++)); do
-        # choose ip
         if [ "$use_optimized_ips" = true ]; then
             current_ip="${ip_list[$i]}"
         else
-            # pick random from list
             idx=$((RANDOM % ${#ip_list[@]}))
             current_ip="${ip_list[$idx]}"
         fi
-        # validate ip-like
+        
         if ! is_ip_or_cidr "$current_ip"; then
             echo -e "${YELLOW}跳过非法条目: $current_ip${NC}"
             continue
         fi
-        # if it's a range like 1.2.3.0/24, pick the network base (前缀部分) to fill .add
+        
         ip_for_add="${current_ip%%/*}"
         new_ps="${original_ps}-优选"
-        # if we have ISP info in list (format "ip ISP"), try to capture it
+        
         if [[ "$current_ip" =~ [[:space:]] ]]; then
             ip_for_add=$(echo "$current_ip" | awk '{print $1}')
             isp_name=$(echo "$current_ip" | cut -d' ' -f2-)
             new_ps="${original_ps}-优选${isp_name}"
         fi
+        
         modified_json=$(echo "$original_json" | jq --arg new_add "$ip_for_add" --arg new_ps "$new_ps" '.add = $new_add | .ps = $new_ps')
         new_base64=$(printf "%s" "$modified_json" | base64 | tr -d '\n')
         out_buf+=$'vmess://'"$new_base64"$'\n'
     done
 
-    # 输出至 stdout 或指定文件
     if [ -n "$OUT_FILE" ]; then
         printf "%s" "$out_buf" > "$OUT_FILE"
         echo -e "${GREEN}生成完毕，已写入: $OUT_FILE${NC}"
