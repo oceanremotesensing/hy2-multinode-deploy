@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# hy2-multinode-oneclick.sh (无二维码 + 可卸载 + 端口冲突检测)
+# hy2-multinode-oneclick.sh
+# 自动连续找空闲端口 + 无二维码 + 可卸载 + systemd启动
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -33,7 +34,7 @@ if [ "$1" = "uninstall" ]; then
   uninstall
 fi
 
-echo -e "${BLUE}==== Hysteria v2 多节点一键部署（无二维码版 + 端口检测） ====${NC}"
+echo -e "${BLUE}==== Hysteria v2 多节点一键部署（自动找空闲端口） ====${NC}"
 
 # 用户输入
 read -p "请输入要安装的节点数量（默认 5）: " USER_NUM
@@ -50,7 +51,7 @@ if ! [[ "$BASE_PORT" =~ ^[0-9]+$ ]] || [ "$BASE_PORT" -lt 1024 ] || [ "$BASE_POR
   BASE_PORT=8443
 fi
 
-# 检测端口是否被占用
+# 端口检测函数
 check_port() {
   local PORT=$1
   if ss -tuln | grep -q ":${PORT} "; then
@@ -60,14 +61,7 @@ check_port() {
   fi
 }
 
-for i in $(seq 0 $((NUM_INSTANCES-1))); do
-  PORT=$((BASE_PORT + i*1000))
-  while ! check_port $PORT; do
-    echo -e "${YELLOW}端口 ${PORT} 已被占用，请输入新的端口: ${NC}"
-    read PORT
-  done
-done
-
+# 清理旧节点
 echo -e "${YELLOW}清理旧节点及配置...${NC}"
 pkill -9 hysteria >/dev/null 2>&1 || true
 mkdir -p ${HY_DIR} ${LOGDIR}
@@ -126,13 +120,22 @@ if [ "$(ps -p 1 -o comm=)" = "systemd" ]; then IS_SYSTEMD=1; fi
 
 echo -e "${BLUE}开始创建节点并启动...${NC}"
 
+CURRENT_PORT=$BASE_PORT
 for i in $(seq 1 $NUM_INSTANCES); do
-  PORT=$((BASE_PORT + (i - 1) * 1000))
+  # 自动找空闲端口
+  while ! check_port $CURRENT_PORT; do
+    ((CURRENT_PORT++))
+    if [ $CURRENT_PORT -gt 65535 ]; then
+      echo -e "${RED}没有足够端口分配给节点${NC}"
+      exit 1
+    fi
+  done
+
   PASSWORD=$(openssl rand -base64 12)
   CFG="${HY_DIR}/config${i}.yaml"
 
   cat > "${CFG}" <<EOF
-listen: ":${PORT}"
+listen: ":${CURRENT_PORT}"
 auth:
   type: password
   password: ${PASSWORD}
@@ -164,18 +167,19 @@ EOF
   else
     nohup ${HY_BIN} server -c ${CFG} > ${LOGDIR}/hy2-${i}.log 2>&1 &
   fi
+
+  NODE_PORTS[$i]=$CURRENT_PORT
+  NODE_PASSWORDS[$i]=$PASSWORD
+  ((CURRENT_PORT++))
 done
 
 sleep 1
 IP=$(curl -s https://api.ipify.org || hostname -I | awk '{print $1}')
 echo -e "${GREEN}安装完成，节点信息如下：${NC}"
 
-for cfg in ${HY_DIR}/config*.yaml; do
-  num=$(basename "${cfg}" | grep -o -E '[0-9]+')
-  port=$(grep -oP '":\K[0-9]+' "${cfg}")
-  password=$(grep -oP 'password: \K.*' "${cfg}")
-  link="hy2://${password}@${IP}:${port}?insecure=1#node${num}"
-  echo -e "${YELLOW}节点 ${num}: ${link}${NC}"
+for i in $(seq 1 $NUM_INSTANCES); do
+  link="hy2://${NODE_PASSWORDS[$i]}@${IP}:${NODE_PORTS[$i]}?insecure=1#node${i}"
+  echo -e "${YELLOW}节点 ${i}: ${link}${NC}"
 done
 
 echo -e "${GREEN}日志目录：${LOGDIR}${NC}"
