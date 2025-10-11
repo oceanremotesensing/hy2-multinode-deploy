@@ -156,7 +156,7 @@ for cfg in ${HY_DIR}/config*.yaml; do
   port=$(grep -oP '":\K[0-9]+' "${cfg}")
   password=$(grep -oP 'password: \K.*' "${cfg}")
   link="hy2://${password}@${IP}:${port}?insecure=1#node${num}"
-  echo -e " ${link}${NC}"
+  echo -e "${link}${NC}"
 done
 
 echo -e "${GREEN}日志目录：${LOGDIR}${NC}"
