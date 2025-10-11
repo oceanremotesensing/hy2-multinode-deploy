@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# hy2-multinode-oneclick.sh (无二维码 + 可卸载)
-# 一键部署/卸载 Hysteria v2 多节点
+# hy2-multinode-oneclick.sh (无二维码 + 可卸载 + 端口冲突检测)
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -15,6 +14,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# 卸载函数
 uninstall() {
   echo -e "${YELLOW}开始卸载 Hysteria 节点...${NC}"
   pkill -9 hysteria >/dev/null 2>&1 || true
@@ -33,8 +33,9 @@ if [ "$1" = "uninstall" ]; then
   uninstall
 fi
 
-echo -e "${BLUE}==== Hysteria v2 多节点一键部署（无二维码版） ====${NC}"
+echo -e "${BLUE}==== Hysteria v2 多节点一键部署（无二维码版 + 端口检测） ====${NC}"
 
+# 用户输入
 read -p "请输入要安装的节点数量（默认 5）: " USER_NUM
 NUM_INSTANCES=${USER_NUM:-5}
 if ! [[ "$NUM_INSTANCES" =~ ^[0-9]+$ ]] || [ "$NUM_INSTANCES" -le 0 ]; then
@@ -48,6 +49,24 @@ if ! [[ "$BASE_PORT" =~ ^[0-9]+$ ]] || [ "$BASE_PORT" -lt 1024 ] || [ "$BASE_POR
   echo -e "${YELLOW}端口不在 1024-65535 范围内，使用默认 8443${NC}"
   BASE_PORT=8443
 fi
+
+# 检测端口是否被占用
+check_port() {
+  local PORT=$1
+  if ss -tuln | grep -q ":${PORT} "; then
+    return 1
+  else
+    return 0
+  fi
+}
+
+for i in $(seq 0 $((NUM_INSTANCES-1))); do
+  PORT=$((BASE_PORT + i*1000))
+  while ! check_port $PORT; do
+    echo -e "${YELLOW}端口 ${PORT} 已被占用，请输入新的端口: ${NC}"
+    read PORT
+  done
+done
 
 echo -e "${YELLOW}清理旧节点及配置...${NC}"
 pkill -9 hysteria >/dev/null 2>&1 || true
@@ -156,7 +175,7 @@ for cfg in ${HY_DIR}/config*.yaml; do
   port=$(grep -oP '":\K[0-9]+' "${cfg}")
   password=$(grep -oP 'password: \K.*' "${cfg}")
   link="hy2://${password}@${IP}:${port}?insecure=1#node${num}"
-  echo -e "${link}${NC}"
+  echo -e "${YELLOW}节点 ${num}: ${link}${NC}"
 done
 
 echo -e "${GREEN}日志目录：${LOGDIR}${NC}"
