@@ -179,7 +179,7 @@ echo -e "${GREEN}安装完成，节点信息如下：${NC}"
 
 for i in $(seq 1 $NUM_INSTANCES); do
   link="hy2://${NODE_PASSWORDS[$i]}@${IP}:${NODE_PORTS[$i]}?insecure=1#node${i}"
-  echo -e "${YELLOW}节点 ${i}: ${link}${NC}"
+  echo -e "${link}${NC}"
 done
 
 echo -e "${GREEN}日志目录：${LOGDIR}${NC}"
