@@ -1,15 +1,39 @@
 #!/usr/bin/env bash
-# hy2-multinode-oneclick.sh (无二维码版)
-# 一键部署多节点 Hysteria v2 —— 自动清理、证书生成、兼容 systemd/nohup
+# hy2-multinode-oneclick.sh (无二维码 + 可卸载)
+# 一键部署/卸载 Hysteria v2 多节点
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-echo -e "${BLUE}==== Hysteria v2 多节点一键部署（无二维码版） ====${NC}"
+HY_DIR="/etc/hysteria2"
+HY_BIN="/usr/local/bin/hysteria"
+LOGDIR="${HY_DIR}/logs"
+CERT="${HY_DIR}/cert.pem"
+KEY="${HY_DIR}/key.pem"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo -e "${RED}请以 root 用户运行此脚本${NC}"
   exit 1
 fi
+
+uninstall() {
+  echo -e "${YELLOW}开始卸载 Hysteria 节点...${NC}"
+  pkill -9 hysteria >/dev/null 2>&1 || true
+  rm -f ${HY_BIN}
+  rm -rf ${HY_DIR}
+  systemctl list-units --type=service --all | grep 'hy2-.*\.service' | awk '{print $1}' | xargs -r systemctl stop
+  systemctl list-units --type=service --all | grep 'hy2-.*\.service' | awk '{print $1}' | xargs -r systemctl disable
+  rm -f /etc/systemd/system/hy2-*.service
+  systemctl daemon-reload
+  echo -e "${GREEN}✅ 卸载完成${NC}"
+  exit 0
+}
+
+# 支持参数 uninstall
+if [ "$1" = "uninstall" ]; then
+  uninstall
+fi
+
+echo -e "${BLUE}==== Hysteria v2 多节点一键部署（无二维码版） ====${NC}"
 
 read -p "请输入要安装的节点数量（默认 5）: " USER_NUM
 NUM_INSTANCES=${USER_NUM:-5}
@@ -25,20 +49,11 @@ if ! [[ "$BASE_PORT" =~ ^[0-9]+$ ]] || [ "$BASE_PORT" -lt 1024 ] || [ "$BASE_POR
   BASE_PORT=8443
 fi
 
-HY_DIR="/etc/hysteria2"
-HY_BIN="/usr/local/bin/hysteria"
-LOGDIR="${HY_DIR}/logs"
-CERT="${HY_DIR}/cert.pem"
-KEY="${HY_DIR}/key.pem"
-
-echo -e "${BLUE}将安装 ${NUM_INSTANCES} 个节点，起始端口 ${BASE_PORT}${NC}"
-
-echo -e "${YELLOW}清理旧 Hysteria 进程与配置...${NC}"
+echo -e "${YELLOW}清理旧节点及配置...${NC}"
 pkill -9 hysteria >/dev/null 2>&1 || true
-mkdir -p ${HY_DIR}
+mkdir -p ${HY_DIR} ${LOGDIR}
 rm -f ${HY_BIN}
 rm -rf ${HY_DIR}/*
-mkdir -p ${HY_DIR} ${LOGDIR}
 
 # 修复 nginx 冲突
 if command -v nginx >/dev/null 2>&1; then
@@ -50,7 +65,7 @@ if command -v nginx >/dev/null 2>&1; then
 fi
 
 # 安装依赖
-echo -e "${BLUE}安装依赖（curl jq openssl socat）...${NC}"
+echo -e "${BLUE}安装依赖（curl jq openssl socat ca-certificates）...${NC}"
 apt-get update -y >/dev/null 2>&1
 apt-get install -y curl jq openssl socat ca-certificates >/dev/null 2>&1
 
@@ -87,7 +102,6 @@ else
   echo -e "${GREEN}检测到已有证书，跳过生成${NC}"
 fi
 
-# systemd 检测
 IS_SYSTEMD=0
 if [ "$(ps -p 1 -o comm=)" = "systemd" ]; then IS_SYSTEMD=1; fi
 
@@ -133,7 +147,6 @@ EOF
   fi
 done
 
-# 输出信息
 sleep 1
 IP=$(curl -s https://api.ipify.org || hostname -I | awk '{print $1}')
 echo -e "${GREEN}安装完成，节点信息如下：${NC}"
