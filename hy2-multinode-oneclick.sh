@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# hy2-multinode-oneclick.sh
-# 自动连续找空闲端口 + 无二维码 + 可卸载 + systemd启动
+# hy2-multinode-oneclick-randomport.sh
+# Hysteria v2 多节点随机端口自动部署
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -34,7 +34,7 @@ if [ "$1" = "uninstall" ]; then
   uninstall
 fi
 
-echo -e "${BLUE}==== Hysteria v2 多节点一键部署（自动找空闲端口） ====${NC}"
+echo -e "${BLUE}==== Hysteria v2 多节点随机端口一键部署 ====${NC}"
 
 # 用户输入
 read -p "请输入要安装的节点数量（默认 5）: " USER_NUM
@@ -44,21 +44,13 @@ if ! [[ "$NUM_INSTANCES" =~ ^[0-9]+$ ]] || [ "$NUM_INSTANCES" -le 0 ]; then
   NUM_INSTANCES=5
 fi
 
-read -p "请输入起始端口（默认 8443）: " USER_PORT
-BASE_PORT=${USER_PORT:-8443}
-if ! [[ "$BASE_PORT" =~ ^[0-9]+$ ]] || [ "$BASE_PORT" -lt 1024 ] || [ "$BASE_PORT" -gt 65535 ]; then
-  echo -e "${YELLOW}端口不在 1024-65535 范围内，使用默认 8443${NC}"
-  BASE_PORT=8443
-fi
-
-# 端口检测函数
-check_port() {
-  local PORT=$1
-  if ss -tuln | grep -q ":${PORT} "; then
-    return 1
-  else
-    return 0
-  fi
+# 端口随机函数
+get_random_port() {
+  while true; do
+    PORT=$(( RANDOM % 64512 + 1024 ))  # 1024~65535
+    ss -tuln | grep -q ":${PORT} " || break
+  done
+  echo $PORT
 }
 
 # 清理旧节点
@@ -115,27 +107,19 @@ else
   echo -e "${GREEN}检测到已有证书，跳过生成${NC}"
 fi
 
+# systemd 检测
 IS_SYSTEMD=0
 if [ "$(ps -p 1 -o comm=)" = "systemd" ]; then IS_SYSTEMD=1; fi
 
 echo -e "${BLUE}开始创建节点并启动...${NC}"
 
-CURRENT_PORT=$BASE_PORT
 for i in $(seq 1 $NUM_INSTANCES); do
-  # 自动找空闲端口
-  while ! check_port $CURRENT_PORT; do
-    ((CURRENT_PORT++))
-    if [ $CURRENT_PORT -gt 65535 ]; then
-      echo -e "${RED}没有足够端口分配给节点${NC}"
-      exit 1
-    fi
-  done
-
+  PORT=$(get_random_port)
   PASSWORD=$(openssl rand -base64 12)
   CFG="${HY_DIR}/config${i}.yaml"
 
   cat > "${CFG}" <<EOF
-listen: ":${CURRENT_PORT}"
+listen: ":${PORT}"
 auth:
   type: password
   password: ${PASSWORD}
@@ -168,9 +152,8 @@ EOF
     nohup ${HY_BIN} server -c ${CFG} > ${LOGDIR}/hy2-${i}.log 2>&1 &
   fi
 
-  NODE_PORTS[$i]=$CURRENT_PORT
+  NODE_PORTS[$i]=$PORT
   NODE_PASSWORDS[$i]=$PASSWORD
-  ((CURRENT_PORT++))
 done
 
 sleep 1
@@ -184,3 +167,4 @@ done
 
 echo -e "${GREEN}日志目录：${LOGDIR}${NC}"
 echo -e "${BLUE}若使用 systemd，可用：systemctl status hy2-<n>${NC}"
+echo -e "${GREEN}🎉 一键部署完成！${NC}"
