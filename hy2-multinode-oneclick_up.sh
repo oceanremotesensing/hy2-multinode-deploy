@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hy2-multinode-auto-unlock.sh
-# Hysteria v2 部署：自动解锁apt + Hex密码 + 聚合二维码
+# 终极版：自带解锁apt + Hex密码 + 聚合二维码
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 HY_DIR="/etc/hysteria2"; HY_BIN="/usr/local/bin/hysteria"
@@ -11,17 +11,25 @@ if [ "$(id -u)" -ne 0 ]; then echo -e "${RED}请以 root 用户运行${NC}"; exi
 
 # === 关键新增：自动释放 apt 锁 ===
 fix_apt_lock() {
-    if pgrep -f "unattended-upgr" >/dev/null || pgrep -f "apt" >/dev/null; then
-        echo -e "${YELLOW}检测到 apt 安装锁被占用，正在强制释放...${NC}"
+    # 杀掉后台自动更新进程
+    if pgrep -f "unattended-upgr" >/dev/null; then
+        echo -e "${YELLOW}检测到系统自动更新占用了锁，正在强制停止...${NC}"
         systemctl stop unattended-upgrades >/dev/null 2>&1
         pkill -9 -f "unattended-upgr"
+    fi
+    
+    # 杀掉apt进程
+    if pgrep -f "apt" >/dev/null || pgrep -f "dpkg" >/dev/null; then
+        echo -e "${YELLOW}检测到 apt/dpkg 进程卡死，正在清理...${NC}"
         pkill -9 -f "apt"
         pkill -9 -f "dpkg"
-        rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock
-        dpkg --configure -a >/dev/null 2>&1
-        echo -e "${GREEN}锁已释放，继续安装...${NC}"
-        sleep 2
     fi
+
+    # 删除锁文件
+    rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock
+    dpkg --configure -a >/dev/null 2>&1
+    echo -e "${GREEN}锁已释放，继续安装...${NC}"
+    sleep 1
 }
 
 ARCH=$(uname -m)
@@ -50,7 +58,7 @@ install_dependencies() {
   fi
 
   if ! command -v qrencode >/dev/null 2>&1; then
-      echo -e "${RED}qrencode 安装失败 (可能是网络源问题)，将跳过二维码生成，仅显示文本链接。${NC}"
+      echo -e "${RED}qrencode 安装失败，将跳过二维码生成，仅显示文本链接。${NC}"
   fi
 }
 
