@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
-# hy2-multinode-merged-qr.sh
-# Hysteria v2 部署：Hex密码 + 所有节点合并为一个二维码
+# hy2-multinode-auto-unlock.sh
+# Hysteria v2 部署：自动解锁apt + Hex密码 + 聚合二维码
 
-# 颜色定义
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-
-# 全局变量
-HY_DIR="/etc/hysteria2"
-HY_BIN="/usr/local/bin/hysteria"
-LOGDIR="${HY_DIR}/logs"
-CERT="${HY_DIR}/cert.pem"
-KEY="${HY_DIR}/key.pem"
+HY_DIR="/etc/hysteria2"; HY_BIN="/usr/local/bin/hysteria"
+LOGDIR="${HY_DIR}/logs"; CERT="${HY_DIR}/cert.pem"; KEY="${HY_DIR}/key.pem"
 MAX_RETRIES=20
 
-# 检查 Root
 if [ "$(id -u)" -ne 0 ]; then echo -e "${RED}请以 root 用户运行${NC}"; exit 1; fi
 
-# 架构检测
-ARCH=$(uname -m)
-case $ARCH in
-  x86_64|amd64) HY_ARCH="amd64" ;;
-  aarch64|arm64) HY_ARCH="arm64" ;;
-  *) echo -e "${RED}不支持架构${NC}"; exit 1 ;;
-esac
+# === 关键新增：自动释放 apt 锁 ===
+fix_apt_lock() {
+    if pgrep -f "unattended-upgr" >/dev/null || pgrep -f "apt" >/dev/null; then
+        echo -e "${YELLOW}检测到 apt 安装锁被占用，正在强制释放...${NC}"
+        systemctl stop unattended-upgrades >/dev/null 2>&1
+        pkill -9 -f "unattended-upgr"
+        pkill -9 -f "apt"
+        pkill -9 -f "dpkg"
+        rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock
+        dpkg --configure -a >/dev/null 2>&1
+        echo -e "${GREEN}锁已释放，继续安装...${NC}"
+        sleep 2
+    fi
+}
 
-# 卸载功能
+ARCH=$(uname -m)
+case $ARCH in x86_64|amd64) HY_ARCH="amd64";; aarch64|arm64) HY_ARCH="arm64";; *) echo -e "${RED}不支持架构${NC}"; exit 1;; esac
+
 uninstall() {
   echo -e "${YELLOW}正在卸载...${NC}"
   systemctl list-units --type=service --all | grep 'hy2-.*\.service' | awk '{print $1}' | xargs -r systemctl stop
@@ -35,8 +37,9 @@ uninstall() {
 }
 [ "$1" = "uninstall" ] && uninstall
 
-# 安装依赖 (必须包含 qrencode)
 install_dependencies() {
+  fix_apt_lock # 先尝试解锁
+  
   echo -e "${BLUE}安装依赖 (含 qrencode)...${NC}"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y && apt-get install -y curl jq openssl ca-certificates qrencode
@@ -45,20 +48,17 @@ install_dependencies() {
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y curl jq openssl ca-certificates qrencode
   fi
-  
+
   if ! command -v qrencode >/dev/null 2>&1; then
-      echo -e "${RED}错误: qrencode 安装失败，无法生成二维码。${NC}"
-      exit 1
+      echo -e "${RED}qrencode 安装失败 (可能是网络源问题)，将跳过二维码生成，仅显示文本链接。${NC}"
   fi
 }
 
 mkdir -p "${HY_DIR}" "${LOGDIR}"; install_dependencies
 
-# 获取 IP
 PUBLIC_IP=$(curl -s4m8 https://api.ipify.org || curl -s4m8 https://ifconfig.me || hostname -I | awk '{print $1}')
 [ -z "$PUBLIC_IP" ] && echo -e "${RED}无法获取 IP${NC}" && exit 1
 
-# 下载 Hysteria
 if [ ! -f "${HY_BIN}" ]; then
   echo -e "${YELLOW}下载 Hysteria 2...${NC}"
   curl -L -f -o "${HY_BIN}" "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY_ARCH}" || \
@@ -66,38 +66,30 @@ if [ ! -f "${HY_BIN}" ]; then
   chmod +x "${HY_BIN}"
 fi
 
-# 生成证书
 if [ ! -f "${CERT}" ]; then
   openssl req -x509 -newkey rsa:2048 -keyout "${KEY}" -out "${CERT}" -days 3650 -nodes -subj "/CN=${PUBLIC_IP}" >/dev/null 2>&1
   chmod 644 "${CERT}" && chmod 600 "${KEY}"
 fi
 
-# 输入数量
 read -p "请输入节点数量 (默认 5): " USER_NUM
 NUM_INSTANCES=${USER_NUM:-5}
 [[ ! "$NUM_INSTANCES" =~ ^[0-9]+$ ]] && NUM_INSTANCES=5
 
-# 清理旧服务
 systemctl list-units --type=service --all | grep 'hy2-.*\.service' | awk '{print $1}' | xargs -r systemctl stop
 rm -f /etc/systemd/system/hy2-*.service; systemctl daemon-reload
 
 echo -e "${BLUE}开始部署...${NC}"
-
-# 用于存储所有链接的变量
 ALL_LINKS_TEXT=""
 
 for i in $(seq 1 "$NUM_INSTANCES"); do
-  # 找端口
   for ((r=0; r<MAX_RETRIES; r++)); do
     PORT=$((RANDOM % 40000 + 20000))
     if ! ss -tuln | grep -q ":${PORT} "; then break; fi
   done
 
-  # 生成 Hex 密码
   PASSWORD=$(openssl rand -hex 16)
   OBFS_PASSWORD=$(openssl rand -hex 8)
   
-  # 写配置
   CFG_FILE="${HY_DIR}/config${i}.yaml"
   cat > "${CFG_FILE}" <<EOF
 listen: :${PORT}
@@ -107,7 +99,6 @@ obfs: { type: salamander, salamander: { password: "${OBFS_PASSWORD}" } }
 masquerade: { type: proxy, proxy: { url: https://www.bing.com/, rewriteHost: true } }
 EOF
 
-  # 写服务
   SERVICE_FILE="/etc/systemd/system/hy2-${i}.service"
   cat > "${SERVICE_FILE}" <<EOF
 [Unit]
@@ -124,33 +115,24 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
-  # 启动
   systemctl enable --now "hy2-${i}" >/dev/null 2>&1
   
-  # 生成链接并追加到变量中
   CURRENT_LINK="hy2://${PASSWORD}@${PUBLIC_IP}:${PORT}/?insecure=1&obfs=salamander&obfs-password=${OBFS_PASSWORD}&sni=${PUBLIC_IP}#Node-${i}"
   ALL_LINKS_TEXT+="${CURRENT_LINK}\n"
   
   echo -e "节点 $i: ${GREEN}OK${NC} (端口 $PORT)"
 done
 
-# 去掉最后一个换行符
 ALL_LINKS_TEXT=$(echo -e "$ALL_LINKS_TEXT" | sed '$d')
 
-echo -e "\n${BLUE}================ 批量复制区域 (推荐) ==============${NC}"
-echo -e "${YELLOW}请复制下方所有内容，在 v2rayN 中选择 '从剪贴板导入批量URL'${NC}"
-echo -e "---------------------------------------------------"
+echo -e "\n${BLUE}================ 批量链接文本 (推荐) ==============${NC}"
 echo -e "$ALL_LINKS_TEXT"
-echo -e "---------------------------------------------------"
 
-echo -e "\n${BLUE}================ 聚合二维码 (All-in-One) ==============${NC}"
-echo -e "${YELLOW}注意：包含 $NUM_INSTANCES 个节点的二维码非常密集。${NC}"
-echo -e "${YELLOW}如果终端显示不全，请缩小字体或最大化窗口，建议使用上面的文本导入。${NC}"
-echo -e "${YELLOW}v2rayN 电脑端截图扫描成功率较高，手机端可能无法识别多行数据。${NC}"
-echo ""
-
-# 生成包含所有链接的二维码
-qrencode -t ANSIUTF8 "$ALL_LINKS_TEXT"
-
-echo ""
+if command -v qrencode >/dev/null 2>&1; then
+  echo -e "\n${BLUE}================ 聚合二维码 (All-in-One) ==============${NC}"
+  echo -e "${YELLOW}提示: 如果二维码过大导致乱码，请缩小终端字体或使用上方文本。${NC}"
+  qrencode -t ANSIUTF8 "$ALL_LINKS_TEXT"
+else
+  echo -e "\n${RED}警告: qrencode 未安装，无法显示二维码，请使用上方文本。${NC}"
+fi
 echo -e "${BLUE}======================================================${NC}"
