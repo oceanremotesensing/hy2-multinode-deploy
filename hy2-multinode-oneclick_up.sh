@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# hy2-multinode-optimized.sh
-# Hysteria v2 多节点随机端口自动部署（优化版）
+# hy2-multinode-optimized-fix.sh
+# Hysteria v2 多节点随机端口自动部署（修复 URL 字符问题版）
 
 # 颜色定义
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -64,7 +64,7 @@ install_dependencies() {
   fi
 }
 
-echo -e "${BLUE}==== Hysteria v2 多节点随机端口一键部署 (优化版) ====${NC}"
+echo -e "${BLUE}==== Hysteria v2 多节点随机端口一键部署 (URL 修复版) ====${NC}"
 
 # 1. 初始清理与准备
 mkdir -p "${HY_DIR}" "${LOGDIR}"
@@ -119,7 +119,7 @@ NUM_INSTANCES=${USER_NUM:-5}
 [[ ! "$NUM_INSTANCES" =~ ^[0-9]+$ ]] && NUM_INSTANCES=5
 
 echo -e "${BLUE}清理旧的服务配置...${NC}"
-# 仅停止本脚本管理的 hy2 服务，避免误杀其他进程
+# 仅停止本脚本管理的 hy2 服务
 systemctl list-units --type=service --all | grep 'hy2-.*\.service' | awk '{print $1}' | xargs -r systemctl stop
 rm -f /etc/systemd/system/hy2-*.service
 systemctl daemon-reload
@@ -132,21 +132,19 @@ echo -e "${BLUE}开始部署 $NUM_INSTANCES 个节点...${NC}"
 for i in $(seq 1 "$NUM_INSTANCES"); do
   # 端口冲突检测与生成
   for ((r=0; r<MAX_RETRIES; r++)); do
-    # 生成 20000-60000 之间的随机端口 (避开常用端口)
     PORT=$((RANDOM % 40000 + 20000))
-    # 使用 ss 检查端口是否被占用 (TCP 和 UDP)
     if ! ss -tuln | grep -q ":${PORT} "; then
       break
     fi
     [ "$r" -eq $((MAX_RETRIES - 1)) ] && echo -e "${RED}警告: 节点 $i 无法找到空闲端口${NC}" && continue 2
   done
 
-  PASSWORD=$(openssl rand -base64 16)
-  OBFS_PASSWORD=$(openssl rand -hex 8) # 生成混淆密码
+  # [修复点] 使用 hex 代替 base64，避免产生 "/" 或 "+" 符号
+  PASSWORD=$(openssl rand -hex 16)
+  OBFS_PASSWORD=$(openssl rand -hex 8)
+
   CFG_FILE="${HY_DIR}/config${i}.yaml"
   
-  # 生成符合 Hy2 标准的配置文件
-  # 注意: v2 废弃了 disable-quic, obfuscate 变为 obfs (salamander)
   cat > "${CFG_FILE}" <<EOF
 listen: :${PORT}
 
@@ -192,16 +190,14 @@ EOF
 
   # 启动服务
   if systemctl enable --now "hy2-${i}" >/dev/null 2>&1; then
-    # 稍微等待以确保端口绑定成功
     sleep 0.5
     if systemctl is-active --quiet "hy2-${i}"; then
        NODE_INFO[$i]="hy2://${PASSWORD}@${PUBLIC_IP}:${PORT}/?insecure=1&obfs=salamander&obfs-password=${OBFS_PASSWORD}&sni=${PUBLIC_IP}#Node-${i}"
        echo -e "节点 $i: ${GREEN}启动成功${NC} (端口: $PORT)"
     else
-       echo -e "节点 $i: ${RED}启动失败${NC} (请检查日志: journalctl -u hy2-${i})"
+       echo -e "节点 $i: ${RED}启动失败${NC}"
     fi
   else
-    # 兼容非 Systemd 系统 (如部分 Docker 容器)
     nohup "${HY_BIN}" server -c "${CFG_FILE}" > "${LOGDIR}/hy2-${i}.log" 2>&1 &
     NODE_INFO[$i]="hy2://${PASSWORD}@${PUBLIC_IP}:${PORT}/?insecure=1&obfs=salamander&obfs-password=${OBFS_PASSWORD}&sni=${PUBLIC_IP}#Node-${i}"
     echo -e "节点 $i: ${GREEN}后台运行中${NC} (端口: $PORT)"
@@ -209,8 +205,8 @@ EOF
 done
 
 echo -e "\n${BLUE}================ 节点配置信息 ==============${NC}"
-echo -e "${YELLOW}提示: 客户端请开启跳过证书验证 (Allow Insecure)${NC}"
-echo -e "${YELLOW}提示: 已启用 Salamander 混淆以防止探测${NC}\n"
+echo -e "${YELLOW}提示: 修复了密码包含特殊字符导致无法导入的问题。${NC}"
+echo -e "${YELLOW}提示: 客户端请开启 'Allow Insecure' (跳过证书验证)${NC}\n"
 
 for i in $(seq 1 "$NUM_INSTANCES"); do
   if [ -n "${NODE_INFO[$i]}" ]; then
@@ -221,6 +217,3 @@ for i in $(seq 1 "$NUM_INSTANCES"); do
 done
 
 echo -e "${BLUE}==========================================${NC}"
-echo -e "配置文件路径: ${HY_DIR}"
-echo -e "查看服务状态: systemctl status hy2-1"
-echo -e "卸载脚本: $0 uninstall"
