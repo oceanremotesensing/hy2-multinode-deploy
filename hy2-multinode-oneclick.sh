@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# xray-vless-reality-fixed.sh
+# reality-clean-reinstall.sh
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -7,24 +7,49 @@ XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/etc/xray"
 CONF="${XRAY_DIR}/config.json"
 
-BASE_PORT=20000          # 起始端口
-PORT_STEP=1              # 端口递增
-SERVER_NAME="www.microsoft.com"
+BASE_PORT=20000
+SERVER_NAME="www.cloudflare.com"
 FP="chrome"
 
-[ "$(id -u)" -ne 0 ] && echo -e "${RED}请使用 root 运行${NC}" && exit 1
+[ "$(id -u)" -ne 0 ] && echo -e "${RED}请用 root 运行${NC}" && exit 1
+
+echo -e "${YELLOW}▶ 开始【彻底清理旧配置】${NC}"
+
+# ===== 停止并删除 xray 服务 =====
+systemctl stop xray 2>/dev/null
+systemctl disable xray 2>/dev/null
+rm -f /etc/systemd/system/xray.service
+systemctl daemon-reload
+
+# ===== 杀掉残留进程 =====
+pkill -9 xray 2>/dev/null
+
+# ===== 删除旧文件 =====
+rm -rf "$XRAY_DIR"
+rm -f "$XRAY_BIN"
+
+# ===== 防火墙重置（保留 SSH）=====
+if command -v ufw >/dev/null 2>&1; then
+  echo -e "${YELLOW}▶ 重置 UFW 防火墙（保留 SSH）${NC}"
+  ufw --force reset
+  ufw allow ssh
+fi
+
+echo -e "${GREEN}✔ 清理完成${NC}"
+
+# ======================================================
+# ================== 开始重新部署 =====================
+# ======================================================
 
 echo -e "${BLUE}▶ 安装依赖...${NC}"
 apt update -y
 apt install -y curl jq uuid-runtime qrencode unzip ufw
 
 # ===== 下载 Xray =====
-if [ ! -f "$XRAY_BIN" ]; then
-  echo -e "${BLUE}▶ 下载 Xray-core...${NC}"
-  curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-  unzip -o xray.zip
-  install -m 755 xray "$XRAY_BIN"
-fi
+echo -e "${BLUE}▶ 下载 Xray-core...${NC}"
+curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+unzip -o xray.zip
+install -m 755 xray "$XRAY_BIN"
 
 mkdir -p "$XRAY_DIR"
 
@@ -36,20 +61,19 @@ REALITY_KEYS=$($XRAY_BIN x25519)
 PRIVATE_KEY=$(echo "$REALITY_KEYS" | awk '/Private key/ {print $3}')
 PUBLIC_KEY=$(echo "$REALITY_KEYS" | awk '/Public key/ {print $3}')
 
-read -p "请输入节点数量（默认 3）: " NUM
-NUM=${NUM:-3}
+read -p "请输入节点数量（默认 2，强兼容推荐 1-2）: " NUM
+NUM=${NUM:-2}
 
 INBOUNDS=()
 LINKS=""
 
-echo -e "${BLUE}▶ 配置节点...${NC}"
+echo -e "${BLUE}▶ 创建节点...${NC}"
 
 for ((i=0;i<NUM;i++)); do
-  PORT=$((BASE_PORT + i * PORT_STEP))
+  PORT=$((BASE_PORT + i))
   UUID=$(uuidgen)
   SHORT_ID=$(openssl rand -hex 4)
 
-  # --- 自动放行防火墙 ---
   ufw allow ${PORT}/tcp >/dev/null 2>&1
 
   INBOUNDS+=("{
@@ -58,8 +82,7 @@ for ((i=0;i<NUM;i++)); do
     \"protocol\": \"vless\",
     \"settings\": {
       \"clients\": [{
-        \"id\": \"$UUID\",
-        \"flow\": \"xtls-rprx-vision\"
+        \"id\": \"$UUID\"
       }],
       \"decryption\": \"none\"
     },
@@ -67,9 +90,7 @@ for ((i=0;i<NUM;i++)); do
       \"network\": \"tcp\",
       \"security\": \"reality\",
       \"realitySettings\": {
-        \"show\": false,
         \"dest\": \"$SERVER_NAME:443\",
-        \"xver\": 0,
         \"serverNames\": [\"$SERVER_NAME\"],
         \"privateKey\": \"$PRIVATE_KEY\",
         \"shortIds\": [\"$SHORT_ID\"]
@@ -77,18 +98,15 @@ for ((i=0;i<NUM;i++)); do
     }
   }")
 
-  LINK="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SERVER_NAME}&fp=${FP}&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Reality-${PORT}"
+  LINK="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&security=reality&sni=${SERVER_NAME}&fp=${FP}&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Reality-${PORT}"
   LINKS+="$LINK\n"
 
-  echo -e "  ✔ 端口 ${GREEN}${PORT}${NC} 已就绪"
+  echo -e "  ✔ 端口 ${GREEN}${PORT}${NC} 就绪"
 done
 
-# ===== 写入配置 =====
 cat > "$CONF" <<EOF
 {
-  "log": {
-    "loglevel": "warning"
-  },
+  "log": { "loglevel": "warning" },
   "inbounds": [
     $(IFS=,; echo "${INBOUNDS[*]}")
   ],
@@ -98,10 +116,9 @@ cat > "$CONF" <<EOF
 }
 EOF
 
-# ===== systemd =====
 cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
-Description=Xray VLESS REALITY
+Description=Xray VLESS REALITY (Clean)
 After=network.target
 
 [Service]
@@ -115,13 +132,10 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now xray
-
-# ===== 启用 UFW（如果没开）=====
 ufw --force enable >/dev/null 2>&1
 
-echo -e "\n${GREEN}✔ Xray 已启动${NC}"
-echo -e "${BLUE}========== VLESS + REALITY 链接 ==========${NC}"
+echo -e "\n${GREEN}✔ 全新 REALITY 已部署完成${NC}"
+echo -e "${BLUE}========== VLESS 链接 ==========${NC}"
 echo -e "$LINKS"
-
 echo -e "${BLUE}========== 聚合二维码 ==========${NC}"
 qrencode -t ANSIUTF8 "$LINKS"
