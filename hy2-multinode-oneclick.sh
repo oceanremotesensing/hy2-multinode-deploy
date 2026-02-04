@@ -1,151 +1,116 @@
 #!/usr/bin/env bash
-# hy2-multinode-oneclick-randomport-fixed.sh
-# Hysteria v2 多节点随机端口自动部署（端口冲突自动重试）
+# xray-vless-reality-multinode.sh
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-HY_DIR="/etc/hysteria2"
-HY_BIN="/usr/local/bin/hysteria"
-LOGDIR="${HY_DIR}/logs"
-CERT="${HY_DIR}/cert.pem"
-KEY="${HY_DIR}/key.pem"
-MAX_RETRIES=20   # 每个节点端口重试次数
+XRAY_BIN="/usr/local/bin/xray"
+XRAY_DIR="/etc/xray"
+CONF="${XRAY_DIR}/config.json"
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo -e "${RED}请以 root 用户运行此脚本${NC}"
-  exit 1
+[ "$(id -u)" -ne 0 ] && echo -e "${RED}请使用 root 运行${NC}" && exit 1
+
+# ===== 安装依赖 =====
+apt update -y
+apt install -y curl jq uuid-runtime qrencode unzip
+
+# ===== 下载 Xray =====
+if [ ! -f "$XRAY_BIN" ]; then
+  echo -e "${BLUE}下载 Xray-core...${NC}"
+  curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+  unzip -o xray.zip
+  install -m 755 xray "$XRAY_BIN"
 fi
 
-uninstall() {
-  echo -e "${YELLOW}开始卸载 Hysteria 节点...${NC}"
-  pkill -9 hysteria >/dev/null 2>&1 || true
-  rm -f ${HY_BIN}
-  rm -rf ${HY_DIR}
-  systemctl list-units --type=service --all | grep 'hy2-.*\.service' | awk '{print $1}' | xargs -r systemctl stop
-  systemctl list-units --type=service --all | grep 'hy2-.*\.service' | awk '{print $1}' | xargs -r systemctl disable
-  rm -f /etc/systemd/system/hy2-*.service
-  systemctl daemon-reload
-  echo -e "${GREEN}✅ 卸载完成${NC}"
-  exit 0
-}
+mkdir -p "$XRAY_DIR"
 
-[ "$1" = "uninstall" ] && uninstall
+PUBLIC_IP=$(curl -s4 https://api.ipify.org)
 
-echo -e "${BLUE}==== Hysteria v2 多节点随机端口一键部署 ====${NC}"
+# ===== 生成 Reality 密钥 =====
+REALITY_KEYS=$($XRAY_BIN x25519)
+PRIVATE_KEY=$(echo "$REALITY_KEYS" | awk '/Private key/ {print $3}')
+PUBLIC_KEY=$(echo "$REALITY_KEYS" | awk '/Public key/ {print $3}')
 
-# 用户输入
-read -p "请输入要安装的节点数量（默认 5）: " USER_NUM
-NUM_INSTANCES=${USER_NUM:-5}
-[[ ! "$NUM_INSTANCES" =~ ^[0-9]+$ ]] && NUM_INSTANCES=5
+# ===== 参数 =====
+read -p "请输入节点数量 (默认 5): " NUM
+NUM=${NUM:-5}
 
-get_random_port() {
-  for ((i=0;i<$MAX_RETRIES;i++)); do
-    PORT=$((RANDOM % 64512 + 1024))
-    ss -tuln | grep -q ":${PORT} " || return $PORT
-  done
-  return 0
-}
+SERVER_NAME="www.microsoft.com"   # 伪装目标，可自行更换
+FP="chrome"
 
-echo -e "${YELLOW}清理旧节点及配置...${NC}"
-pkill -9 hysteria >/dev/null 2>&1 || true
-mkdir -p ${HY_DIR} ${LOGDIR}
-rm -f ${HY_BIN}
-rm -rf ${HY_DIR}/*
+INBOUNDS=()
+LINKS=""
 
-# nginx 冲突
-if command -v nginx >/dev/null 2>&1; then
-  grep -rl "default_server" /etc/nginx/sites-enabled/ 2>/dev/null | while read -r f; do
-    sed -i 's/default_server//g' "$f" || true
-  done
-  nginx -t >/dev/null 2>&1 && echo -e "${GREEN}nginx 配置检测通过${NC}" || echo -e "${YELLOW}nginx 检测失败，继续${NC}"
-fi
+for i in $(seq 1 "$NUM"); do
+  PORT=$((RANDOM % 20000 + 20000))
+  UUID=$(uuidgen)
+  SHORT_ID=$(openssl rand -hex 4)
 
-# 安装依赖
-apt-get update -y >/dev/null 2>&1
-apt-get install -y curl jq openssl socat ca-certificates >/dev/null 2>&1
+  INBOUNDS+=("{
+    \"port\": $PORT,
+    \"protocol\": \"vless\",
+    \"settings\": {
+      \"clients\": [{
+        \"id\": \"$UUID\",
+        \"flow\": \"xtls-rprx-vision\"
+      }],
+      \"decryption\": \"none\"
+    },
+    \"streamSettings\": {
+      \"network\": \"tcp\",
+      \"security\": \"reality\",
+      \"realitySettings\": {
+        \"show\": false,
+        \"dest\": \"$SERVER_NAME:443\",
+        \"xver\": 0,
+        \"serverNames\": [\"$SERVER_NAME\"],
+        \"privateKey\": \"$PRIVATE_KEY\",
+        \"shortIds\": [\"$SHORT_ID\"]
+      }
+    }
+  }")
 
-# 下载 hysteria
-ARCH=$(uname -m)
-case $ARCH in x86_64|amd64) HY_ARCH="amd64";; aarch64|arm64) HY_ARCH="arm64";; *) echo -e "${RED}不支持架构${NC}"; exit 1;; esac
-URLS=(
-  "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY_ARCH}"
-  "https://ghproxy.net/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY_ARCH}"
-  "https://cdn.jsdelivr.net/gh/apernet/hysteria@master/build/hysteria-linux-${HY_ARCH}"
-)
-for u in "${URLS[@]}"; do
-  if curl -fsSL -o "${HY_BIN}" "$u"; then chmod +x "${HY_BIN}"; break; fi
+  LINK="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SERVER_NAME}&fp=${FP}&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Reality-${i}"
+  LINKS+="$LINK\n"
+
+  echo -e "节点 $i: ${GREEN}端口 $PORT${NC}"
 done
-[ ! -f "${HY_BIN}" ] && echo -e "${RED}下载失败${NC}" && exit 1
 
-# 证书
-if [ ! -f "${CERT}" ] || [ ! -f "${KEY}" ]; then
-  openssl req -x509 -newkey rsa:2048 -keyout "${KEY}" -out "${CERT}" -days 3650 -nodes -subj "/CN=localhost" >/dev/null 2>&1
-  chmod 600 "${KEY}"
-fi
-
-IS_SYSTEMD=0
-[ "$(ps -p 1 -o comm=)" = "systemd" ] && IS_SYSTEMD=1
-
-declare -A NODE_PORTS NODE_PASSWORDS
-
-echo -e "${BLUE}开始创建节点并启动...${NC}"
-
-for i in $(seq 1 $NUM_INSTANCES); do
-  for ((r=1;r<=$MAX_RETRIES;r++)); do
-    PORT=$((RANDOM % 64512 + 1024))
-    ss -tuln | grep -q ":${PORT} " && continue
-    PASSWORD=$(openssl rand -base64 12)
-    CFG="${HY_DIR}/config${i}.yaml"
-    cat > "${CFG}" <<EOF
-listen: ":${PORT}"
-auth:
-  type: password
-  password: ${PASSWORD}
-tls:
-  cert: ${CERT}
-  key: ${KEY}
-obfuscate:
-  type: srtp
-disable-quic: true
+# ===== 写配置 =====
+cat > "$CONF" <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    $(IFS=,; echo "${INBOUNDS[*]}")
+  ],
+  "outbounds": [{
+    "protocol": "freedom"
+  }]
+}
 EOF
 
-    if [ $IS_SYSTEMD -eq 1 ]; then
-      SERVICE="/etc/systemd/system/hy2-${i}.service"
-      cat > "${SERVICE}" <<EOF
+# ===== systemd =====
+cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
-Description=Hysteria v2 Node ${i}
+Description=Xray VLESS REALITY
 After=network.target
 
 [Service]
-ExecStart=${HY_BIN} server -c ${CFG}
+ExecStart=$XRAY_BIN run -c $CONF
 Restart=always
-RestartSec=3
+LimitNOFILE=65535
+
 [Install]
 WantedBy=multi-user.target
 EOF
-      systemctl daemon-reload
-      systemctl enable --now hy2-${i} >/dev/null 2>&1
-    else
-      nohup ${HY_BIN} server -c ${CFG} > ${LOGDIR}/hy2-${i}.log 2>&1 &
-    fi
 
-    sleep 0.3
-    # 检测端口是否绑定成功
-    if ss -tuln | grep -q ":${PORT} "; then
-      NODE_PORTS[$i]=$PORT
-      NODE_PASSWORDS[$i]=$PASSWORD
-      break
-    fi
-  done
-  [ -z "${NODE_PORTS[$i]}" ] && echo -e "${RED}节点 $i 创建失败，请重试${NC}"
-done
+systemctl daemon-reload
+systemctl enable --now xray
 
-IP=$(curl -s https://api.ipify.org || hostname -I | awk '{print $1}')
-echo -e "${GREEN}安装完成，节点信息如下：${NC}"
-for i in $(seq 1 $NUM_INSTANCES); do
-  [ -n "${NODE_PORTS[$i]}" ] && echo -e "hy2://${NODE_PASSWORDS[$i]}@${IP}:${NODE_PORTS[$i]}?insecure=1#node${i}"
-done
+# ===== 输出 =====
+echo -e "\n${BLUE}=========== VLESS + REALITY 链接 ===========${NC}"
+echo -e "$LINKS"
 
-echo -e "${GREEN}日志目录：${LOGDIR}${NC}"
-echo -e "${BLUE}若使用 systemd，可用：systemctl status hy2-<n>${NC}"
-echo -e "${GREEN}🎉 一键部署完成！${NC}"
+echo -e "${BLUE}=========== 聚合二维码 ===========${NC}"
+qrencode -t ANSIUTF8 "$LINKS"
