@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# reality-vision-stable.sh
-# Xray Reality TCP 多节点 · 随机端口 · 多 SNI · 持久密钥 · 最稳方案
+# reality-reset-clean.sh
+# 彻底清理旧数据 · 强制重装 Xray Reality · 全新密钥
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -8,24 +8,19 @@ XRAY_BIN="/usr/local/bin/xray"
 XRAY_DIR="/etc/xray"
 CONF="${XRAY_DIR}/config.json"
 KEY_FILE="${XRAY_DIR}/reality.key"
+SERVICE_FILE="/etc/systemd/system/xray.service"
 
-FP="chrome"
-
-# ===== 稳定 SNI 池 =====
+# SNI 列表
 SERVER_NAMES=(
   "www.microsoft.com"
   "learn.microsoft.com"
   "www.bing.com"
-  "www.office.com"
   "www.live.com"
-  "login.microsoftonline.com"
   "azure.microsoft.com"
   "www.cloudflare.com"
   "developers.cloudflare.com"
-  "dash.cloudflare.com"
-  "blog.cloudflare.com"
-  "workers.cloudflare.com"
-  "pages.cloudflare.com"
+  "shopify.com"
+  "www.yahoo.com"
 )
 PORT_MIN=20000
 PORT_MAX=59999
@@ -33,75 +28,109 @@ USED_PORTS=()
 
 [ "$(id -u)" -ne 0 ] && echo -e "${RED}❌ 请用 root 运行${NC}" && exit 1
 
-echo -e "${YELLOW}▶ Xray Reality TCP 多节点（稳定方案）${NC}"
+# ==========================================
+# 1. 暴力清理旧环境 (响应你的要求)
+# ==========================================
+echo -e "${YELLOW}🔥 正在执行彻底清理 (删除所有旧配置)...${NC}"
 
-read -p "请输入节点数量 (默认 10): " NODE_NUM
-NODE_NUM=${NODE_NUM:-10}
+systemctl stop xray >/dev/null 2>&1
+systemctl disable xray >/dev/null 2>&1
+
+# 删除二进制、配置目录、密钥、日志、服务文件
+rm -rf "$XRAY_DIR"
+rm -f "$XRAY_BIN"
+rm -f "$SERVICE_FILE"
+rm -f /usr/bin/xray # 有些旧脚本装在这里
+rm -f ~/xray.zip
+
+# 杀掉残留进程
+pkill -9 xray >/dev/null 2>&1
+
+systemctl daemon-reload
+echo -e "${GREEN}✔ 清理完毕，环境已重置${NC}"
+
+# ==========================================
+# 2. 基础依赖与下载
+# ==========================================
+apt update -y
+apt install -y curl uuid-runtime unzip ufw openssl
+
+ARCH=$(uname -m)
+echo -e "${BLUE}▶ 检测架构: ${ARCH}${NC}"
+
+# 使用官方源
+case $ARCH in
+  x86_64) URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" ;;
+  aarch64) URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip" ;;
+  *) echo -e "${RED}❌ 不支持的架构${NC}"; exit 1 ;;
+esac
+
+echo -e "${BLUE}▶ 下载 Xray Core...${NC}"
+curl -L -o xray.zip "$URL"
+
+if [ ! -s xray.zip ]; then
+    echo -e "${RED}❌ 下载失败 (文件为空)。请检查服务器网络。${NC}"
+    exit 1
+fi
+
+unzip -o xray.zip >/dev/null
+install -m 755 xray "$XRAY_BIN"
+rm -f xray.zip geoip.dat geosite.dat LICENSE README.md xray
+
+# 验证二进制文件
+if ! "$XRAY_BIN" version >/dev/null 2>&1; then
+    echo -e "${RED}❌ Xray 安装失败，无法运行！${NC}"
+    exit 1
+fi
+
+mkdir -p "$XRAY_DIR"
+
+# ==========================================
+# 3. 生成全新密钥 (强制覆盖)
+# ==========================================
+echo -e "${BLUE}▶ 生成全新的 Reality 密钥对...${NC}"
+"$XRAY_BIN" x25519 > "$KEY_FILE"
+
+PRIVATE_KEY=$(grep -i "Private key" "$KEY_FILE" | awk '{print $NF}' | tr -d '\r')
+PUBLIC_KEY=$(grep -i "Public key"  "$KEY_FILE" | awk '{print $NF}' | tr -d '\r')
+
+if [[ ${#PUBLIC_KEY} -lt 40 ]]; then
+    echo -e "${RED}❌ 密钥生成失败，请重试${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}🔑 新密钥生成成功${NC}"
+
+# ==========================================
+# 4. 生成多节点配置
+# ==========================================
+read -p "请输入节点数量 (默认 5): " NODE_NUM
+NODE_NUM=${NODE_NUM:-5}
+PUBLIC_IP=$(curl -s4 https://api.ipify.org || curl -s4 ip.sb)
 
 get_random_port() {
   while true; do
     PORT=$((RANDOM % (PORT_MAX - PORT_MIN + 1) + PORT_MIN))
     printf '%s\n' "${USED_PORTS[@]}" | grep -qx "$PORT" && continue
-    ss -lnt | awk '{print $4}' | grep -q ":$PORT$" && continue
+    if ss -lnt | grep -q ":$PORT$"; then continue; fi
     USED_PORTS+=("$PORT")
     echo "$PORT"; return
   done
 }
 
-# ===== 清理 =====
-systemctl stop xray 2>/dev/null
-rm -rf "$XRAY_DIR" "$XRAY_BIN"
-rm -f /etc/systemd/system/xray.service
-pkill -9 xray 2>/dev/null
-
-apt update -y
-apt install -y curl uuid-runtime unzip ufw ntpdate openssl
-ntpdate pool.ntp.org
-
-# ===== 下载 Xray =====
-ARCH=$(uname -m)
-case $ARCH in
-  x86_64) URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" ;;
-  aarch64) URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip" ;;
-  *) echo -e "${RED}不支持架构${NC}"; exit 1 ;;
-esac
-
-curl -L -o xray.zip "$URL"
-unzip -o xray.zip >/dev/null
-install -m 755 xray "$XRAY_BIN"
-mkdir -p "$XRAY_DIR"
-rm -f xray.zip
-
-PUBLIC_IP=$(curl -s4 https://api.ipify.org || curl -s4 ip.sb)
-
-# ===== Reality 密钥（稳定解析）=====
-if [ -f "$KEY_FILE" ]; then
-  echo -e "${GREEN}🔑 使用已有 Reality 密钥${NC}"
-else
-  echo -e "${GREEN}🔑 生成新的 Reality 密钥${NC}"
-  $XRAY_BIN x25519 > "$KEY_FILE"
-fi
-
-PRIVATE_KEY=$(grep -i "Private key" "$KEY_FILE" | awk '{print $NF}' | tr -d '\r')
-PUBLIC_KEY=$(grep -i "Public key"  "$KEY_FILE" | awk '{print $NF}' | tr -d '\r')
-# ===== 公钥合法性校验 =====
-if ! echo "$PUBLIC_KEY" | grep -Eq '^[A-Za-z0-9_-]{43,44}$'; then
-  echo -e "${RED}❌ Reality PublicKey 非法：$PUBLIC_KEY${NC}"
-  exit 1
-fi
-
 INBOUNDS_JSON=""
 ALL_LINKS=""
 COUNT=0
 
-echo -e "${BLUE}▶ 正在生成节点...${NC}"
+echo -e "${BLUE}▶ 正在构建配置...${NC}"
 
 while [ $COUNT -lt $NODE_NUM ]; do
   PORT=$(get_random_port)
   UUID=$(uuidgen)
-  SID=$(openssl rand -hex 8)
+  SID=$(openssl rand -hex 4) # 这里的 shortId 必须短一点
   SERVER_NAME=${SERVER_NAMES[$RANDOM % ${#SERVER_NAMES[@]}]}
 
+  # 自动开放防火墙
   ufw allow "$PORT"/tcp >/dev/null 2>&1
 
   NODE_JSON=$(cat <<EOF
@@ -110,7 +139,7 @@ while [ $COUNT -lt $NODE_NUM ]; do
   "port": $PORT,
   "protocol": "vless",
   "settings": {
-    "clients": [{ "id": "$UUID" }],
+    "clients": [{ "id": "$UUID", "flow": "" }],
     "decryption": "none"
   },
   "streamSettings": {
@@ -126,18 +155,17 @@ while [ $COUNT -lt $NODE_NUM ]; do
 }
 EOF
 )
-
   [ $COUNT -gt 0 ] && INBOUNDS_JSON+=","
   INBOUNDS_JSON+="$NODE_JSON"
 
-  # ===== 客户端链接（无 flow，最稳）=====
-  LINK="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&security=reality&type=tcp&sni=${SERVER_NAME}&fp=${FP}&pbk=${PUBLIC_KEY}&sid=${SID}#Reality-${PORT}"
+  # 生成链接 (注意：为了兼容性，不加 flow)
+  LINK="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&security=reality&type=tcp&sni=${SERVER_NAME}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SID}#Reality-${PORT}"
   ALL_LINKS+="${LINK}\n"
-
-  echo -e " ✔ 端口 ${GREEN}${PORT}${NC} | SNI ${BLUE}${SERVER_NAME}${NC}"
+  
   COUNT=$((COUNT + 1))
 done
 
+# 写入配置文件
 cat > "$CONF" <<EOF
 {
   "log": { "loglevel": "warning" },
@@ -146,9 +174,12 @@ cat > "$CONF" <<EOF
 }
 EOF
 
-cat > /etc/systemd/system/xray.service <<EOF
+# ==========================================
+# 5. 启动服务
+# ==========================================
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Xray Reality TCP Stable
+Description=Xray Reality Service
 After=network.target
 
 [Service]
@@ -164,13 +195,18 @@ systemctl daemon-reload
 systemctl enable --now xray
 ufw --force enable >/dev/null 2>&1
 
-echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-sysctl -p >/dev/null 2>&1
+# BBR 优化
+if ! grep -q "bbr" /etc/sysctl.conf; then
+  echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+  echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+  sysctl -p >/dev/null 2>&1
+fi
 
-echo -e "\n${GREEN}====================================${NC}"
-echo -e "${GREEN}✔ Reality TCP 节点部署完成（最稳）${NC}"
-echo -e "${GREEN}====================================${NC}"
-echo -e "${BLUE}---------- 客户端链接 ----------${NC}"
+echo -e "\n${GREEN}========================================${NC}"
+echo -e "${GREEN}       安装完成 (已清理旧数据)          ${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo -e "${YELLOW}⚠️  警告：公钥已变更！必须删除客户端所有旧节点！${NC}"
+echo -e "${YELLOW}⚠️  警告：请直接复制下方新链接导入！${NC}"
+echo -e "${BLUE}----------------------------------------${NC}"
 echo -e "$ALL_LINKS"
-echo -e "${BLUE}---------------------------------${NC}"
+echo -e "${BLUE}----------------------------------------${NC}"
