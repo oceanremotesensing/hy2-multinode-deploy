@@ -82,9 +82,8 @@ else
   $XRAY_BIN x25519 > "$KEY_FILE"
 fi
 
-PRIVATE_KEY=$(sed -n 's/^Private key: //p' "$KEY_FILE" | tr -d '\r')
-PUBLIC_KEY=$(sed -n 's/^Public key: //p' "$KEY_FILE" | tr -d '\r')
-
+PRIVATE_KEY=$(grep -i "Private key" "$KEY_FILE" | awk '{print $NF}' | tr -d '\r')
+PUBLIC_KEY=$(grep -i "Public key"  "$KEY_FILE" | awk '{print $NF}' | tr -d '\r')
 # ===== 公钥合法性校验 =====
 if ! echo "$PUBLIC_KEY" | grep -Eq '^[A-Za-z0-9_-]{43,44}$'; then
   echo -e "${RED}❌ Reality PublicKey 非法：$PUBLIC_KEY${NC}"
