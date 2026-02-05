@@ -1,6 +1,6 @@
 #!/bin/bash
-# Xray-Reality-10-Nodes-Fixed-Final.sh
-# 完整修复版：稳定生成密钥，10节点 Reality Vision TCP，多 SNI，多端口
+# Xray-Reality-10-Nodes-Stable.sh
+# 完整稳定版：10节点 Reality Vision TCP，多 SNI，多端口，密钥生成兼容最新 Xray
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 XRAY_BIN="/usr/local/bin/xray"
@@ -9,16 +9,18 @@ KEY_FILE="/etc/xray/reality.key"
 
 [ "$(id -u)" -ne 0 ] && echo -e "${RED}❌ 请用 root 运行${NC}" && exit 1
 
+# ================= Step1: 清理旧环境 =================
 echo -e "${YELLOW}🧹 Step1: 清理旧环境${NC}"
 systemctl stop xray >/dev/null 2>&1
 pkill -9 xray >/dev/null 2>&1
 rm -rf /etc/xray /usr/local/bin/xray /etc/systemd/system/xray.service
 
-echo -e "${BLUE}▶ 同步时间${NC}"
+echo -e "${BLUE}▶ 同步系统时间${NC}"
 apt update -y >/dev/null
 apt install -y ntpdate curl wget unzip jq uuid-runtime openssl >/dev/null
 ntpdate pool.ntp.org >/dev/null
 
+# ================= Step2: 下载 Xray 核心 =================
 echo -e "${YELLOW}⬇️ Step2: 下载 Xray 核心${NC}"
 ARCH=$(uname -m)
 case $ARCH in
@@ -38,20 +40,18 @@ if [[ "$VER_INFO" != *"Xray"* ]]; then
 fi
 echo -e "${GREEN}✔ Xray 核心安装成功${NC}"
 
-# ==========================================
-# Step3: 生成 Reality 密钥
-# ==========================================
+# ================= Step3: 生成 Reality 密钥 =================
 mkdir -p /etc/xray
 if [ -f "$KEY_FILE" ]; then
     echo -e "${GREEN}🔑 读取已有密钥${NC}"
-    PRIVATE_KEY=$(grep -i "PrivateKey" "$KEY_FILE" | sed 's/.*: //')
-    PUBLIC_KEY=$(grep -i "PublicKey" "$KEY_FILE" | sed 's/.*: //')
+    PRIVATE_KEY=$(grep -iE "PrivateKey" "$KEY_FILE" | head -n1 | sed 's/.*:[[:space:]]*//')
+    PUBLIC_KEY=$(grep -iE "PublicKey" "$KEY_FILE" | head -n1 | sed 's/.*:[[:space:]]*//')
 else
     echo -e "${BLUE}🔑 生成新密钥...${NC}"
     for i in {1..5}; do
         KEY_OUT=$("$XRAY_BIN" x25519 2>/dev/null)
-        PRIVATE_KEY=$(echo "$KEY_OUT" | grep -i "PrivateKey" | sed 's/.*: //')
-        PUBLIC_KEY=$(echo "$KEY_OUT" | grep -i "PublicKey" | sed 's/.*: //')
+        PRIVATE_KEY=$(echo "$KEY_OUT" | grep -iE "PrivateKey" | head -n1 | sed 's/.*:[[:space:]]*//')
+        PUBLIC_KEY=$(echo "$KEY_OUT" | grep -iE "PublicKey" | head -n1 | sed 's/.*:[[:space:]]*//')
         if [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]]; then
             echo "$KEY_OUT" > "$KEY_FILE"
             break
@@ -66,11 +66,8 @@ if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
 fi
 echo -e "${GREEN}✔ 密钥生成成功!${NC}"
 
-# ==========================================
-# Step4: 生成 10 个节点
-# ==========================================
+# ================= Step4: 生成 10 个节点 =================
 echo -e "${BLUE}⚡ 生成 10 个节点配置${NC}"
-
 SERVER_NAMES=("learn.microsoft.com" "www.microsoft.com" "www.bing.com" "www.cloudflare.com")
 INBOUNDS="["
 LINKS=""
@@ -107,9 +104,7 @@ cat > "$CONF_FILE" <<EOF
 }
 EOF
 
-# ==========================================
-# Step5: 启动 Xray 服务
-# ==========================================
+# ================= Step5: 启动 Xray =================
 echo -e "${BLUE}🚀 启动 Xray 服务${NC}"
 cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
