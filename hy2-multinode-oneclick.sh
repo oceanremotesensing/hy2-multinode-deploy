@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# reality-10-nodes-fixed-v2.sh
-# 修复版：自动架构检测 + 稳健的密钥生成 + 依赖修复
+# reality-10-nodes-fixed-v3.sh
+# 优化版：修复端口随机范围 + 增加 XTLS Vision + 兼容 CentOS
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -24,114 +24,95 @@ SERVER_NAMES=(
 )
 PORT_MIN=20000
 PORT_MAX=59999
-USED_PORTS=()
 
 [ "$(id -u)" -ne 0 ] && echo -e "${RED}❌ 请用 root 运行${NC}" && exit 1
 
 # ==========================================
-# 0. 基础依赖检查与安装
+# 0. 基础依赖检查与安装 (兼容 CentOS/Debian)
 # ==========================================
 echo -e "${BLUE}▶ 正在检查系统依赖...${NC}"
-apt update -y >/dev/null 2>&1
-# 必须安装 uuid-runtime 用于生成 UUID，openssl 用于生成 sid
-apt install -y curl wget unzip jq uuid-runtime openssl >/dev/null 2>&1
+
+# 简单的包管理器检测
+if command -v apt >/dev/null 2>&1; then
+    PM="apt"
+    $PM update -y >/dev/null 2>&1
+    $PM install -y curl wget unzip jq uuid-runtime openssl coreutils >/dev/null 2>&1
+elif command -v dnf >/dev/null 2>&1; then
+    PM="dnf"
+    $PM install -y curl wget unzip jq util-linux openssl coreutils >/dev/null 2>&1
+elif command -v yum >/dev/null 2>&1; then
+    PM="yum"
+    $PM install -y curl wget unzip jq util-linux openssl coreutils >/dev/null 2>&1
+else
+    echo -e "${RED}❌ 未知系统，请手动安装依赖 (curl, wget, unzip, jq, uuid/util-linux, openssl)${NC}"
+    exit 1
+fi
 
 # ==========================================
-# 1. 环境清理
+# 1. 环境清理 & 时间同步
 # ==========================================
-echo -e "${YELLOW}🔥 正在清理旧配置...${NC}"
+echo -e "${YELLOW}🔥 正在清理环境并同步时间...${NC}"
 systemctl stop xray >/dev/null 2>&1
 rm -rf "$XRAY_DIR"
 rm -f /etc/systemd/system/xray.service
 mkdir -p "$XRAY_DIR"
 
+# 强制同步时间 (Xray 强依赖时间)
+date -s "$(curl -sI https://google.com | grep ^Date: | sed 's/Date: //g')" >/dev/null 2>&1
+echo -e "${GREEN}✔ 时间同步完成: $(date)${NC}"
+
 # ==========================================
-# 2. 核心检测与安装 (自动架构适配)
+# 2. 核心检测与安装
 # ==========================================
 echo -e "${BLUE}▶ 检测 Xray 核心状态...${NC}"
 
 install_xray() {
     echo -e "${YELLOW}⬇️ 正在下载 Xray Core...${NC}"
-    
-    # 检测架构
     ARCH=$(uname -m)
     case $ARCH in
-        x86_64)
-            FILE_ARCH="64"
-            ;;
-        aarch64|arm64)
-            FILE_ARCH="arm64-v8a"
-            ;;
-        *)
-            echo -e "${RED}❌ 不支持的架构: $ARCH${NC}"
-            exit 1
-            ;;
+        x86_64) FILE_ARCH="64" ;;
+        aarch64|arm64) FILE_ARCH="arm64-v8a" ;;
+        *) echo -e "${RED}❌ 不支持的架构: $ARCH${NC}"; exit 1 ;;
     esac
 
-    # 创建临时目录
     mkdir -p /tmp/xray_install
     cd /tmp/xray_install || exit 1
 
-    # 下载
     DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${FILE_ARCH}.zip"
     curl -L -o xray.zip "$DOWNLOAD_URL"
 
-    # 解压并安装
     if unzip -o xray.zip >/dev/null; then
         install -m 755 xray "$XRAY_BIN"
         echo -e "${GREEN}✔ Xray 安装成功 (架构: $FILE_ARCH)${NC}"
     else
-        echo -e "${RED}❌ 解压失败，下载文件可能损坏${NC}"
-        cd ~
-        rm -rf /tmp/xray_install
-        exit 1
+        echo -e "${RED}❌ 下载或解压失败${NC}"
+        cd ~ && rm -rf /tmp/xray_install && exit 1
     fi
-
-    # 清理
-    cd ~
-    rm -rf /tmp/xray_install
+    cd ~ && rm -rf /tmp/xray_install
 }
 
-# 检查当前核心能否运行
 if [ -f "$XRAY_BIN" ] && "$XRAY_BIN" version >/dev/null 2>&1; then
-    echo -e "${GREEN}✔ 检测到现有 Xray 核心正常，跳过下载。${NC}"
+    echo -e "${GREEN}✔ 检测到现有核心，跳过下载。${NC}"
 else
     install_xray
-    # 再次检查
-    if ! "$XRAY_BIN" version >/dev/null 2>&1; then
-        echo -e "${RED}❌ 严重错误：新安装的核心无法运行，请检查系统兼容性。${NC}"
-        exit 1
-    fi
 fi
 
 # ==========================================
-# 3. 密钥生成 (修复正则匹配)
+# 3. 密钥生成
 # ==========================================
 echo -e "${BLUE}▶ 正在生成密钥对...${NC}"
-
-# 运行命令获取输出
 KEY_OUTPUT=$("$XRAY_BIN" x25519)
+[ -z "$KEY_OUTPUT" ] && echo -e "${RED}❌ 生成密钥失败${NC}" && exit 1
 
-if [ -z "$KEY_OUTPUT" ]; then
-    echo -e "${RED}❌ 致命错误：xray x25519 命令没有任何输出！${NC}"
-    exit 1
-fi
-
-# 写入文件留底
 echo "$KEY_OUTPUT" > "$KEY_FILE"
+# 优化提取逻辑，防止格式变动
+PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep "Private key" | awk '{print $NF}' | tr -d ' \r\n')
+PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep "Public key" | awk '{print $NF}' | tr -d ' \r\n')
 
-# 修复后的提取逻辑：使用 awk -F': ' 更加精准
-PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep "Private key" | awk -F': ' '{print $2}' | tr -d ' \r\n')
-PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep "Public key" | awk -F': ' '{print $2}' | tr -d ' \r\n')
-
-# 调试检查
-if [[ ${#PRIVATE_KEY} -lt 40 || ${#PUBLIC_KEY} -lt 40 ]]; then
-    echo -e "${RED}❌ 密钥提取失败。${NC}"
-    echo -e "原始输出:\n$KEY_OUTPUT"
-    exit 1
+if [[ ${#PRIVATE_KEY} -lt 40 ]]; then
+    echo -e "${RED}❌ 密钥无效${NC}"; exit 1
 fi
-
-echo -e "${GREEN}✔ 密钥生成完毕!${NC}"
+echo -e "${GREEN}✔ 密钥生成完毕${NC}"
 
 # ==========================================
 # 4. 生成 10 个节点配置
@@ -142,16 +123,17 @@ ALL_LINKS=""
 COUNT=0
 NODE_NUM=10 
 
+# 使用 shuf 生成真正的随机端口，避免 Bash RANDOM 限制
 get_random_port() {
   while true; do
-    PORT=$((RANDOM % (PORT_MAX - PORT_MIN + 1) + PORT_MIN))
-    # 检查端口占用
+    # shuf -i 生成范围内的随机数
+    PORT=$(shuf -i $PORT_MIN-$PORT_MAX -n 1)
     if ss -lnt | grep -q ":$PORT "; then continue; fi
     echo "$PORT"; return
   done
 }
 
-echo -e "${BLUE}▶ 正在生成 $NODE_NUM 个新节点...${NC}"
+echo -e "${BLUE}▶ 正在生成 $NODE_NUM 个新节点 (开启 XTLS Vision)...${NC}"
 
 while [ $COUNT -lt $NODE_NUM ]; do
   PORT=$(get_random_port)
@@ -159,18 +141,17 @@ while [ $COUNT -lt $NODE_NUM ]; do
   SID=$(openssl rand -hex 4)
   SERVER_NAME=${SERVER_NAMES[$RANDOM % ${#SERVER_NAMES[@]}]}
 
-  # 尝试开放防火墙 (兼容 ufw)
-  if command -v ufw >/dev/null 2>&1; then
-      ufw allow "$PORT"/tcp >/dev/null 2>&1
-  fi
+  if command -v ufw >/dev/null 2>&1; then ufw allow "$PORT"/tcp >/dev/null 2>&1; fi
+  if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port="$PORT"/tcp --permanent >/dev/null 2>&1; fi
 
+  # 启用 xtls-rprx-vision
   NODE_JSON=$(cat <<EOF
 {
   "listen": "0.0.0.0",
   "port": $PORT,
   "protocol": "vless",
   "settings": {
-    "clients": [{ "id": "$UUID", "flow": "" }],
+    "clients": [{ "id": "$UUID", "flow": "xtls-rprx-vision" }],
     "decryption": "none"
   },
   "streamSettings": {
@@ -189,14 +170,16 @@ EOF
   [ $COUNT -gt 0 ] && INBOUNDS_JSON+=","
   INBOUNDS_JSON+="$NODE_JSON"
 
-  # 链接生成
-  LINK="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&security=reality&type=tcp&sni=${SERVER_NAME}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SID}#Reality-${PORT}"
+  # 链接包含 flow 参数
+  LINK="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&type=tcp&sni=${SERVER_NAME}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SID}#Reality-Vision-${PORT}"
   ALL_LINKS+="${LINK}\n"
   
   COUNT=$((COUNT + 1))
 done
 
-# 写入配置文件
+if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --reload >/dev/null 2>&1; fi
+
+# 写入配置
 cat > "$CONF" <<EOF
 {
   "log": { "loglevel": "warning" },
@@ -210,7 +193,7 @@ EOF
 # ==========================================
 cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
-Description=Xray Reality 10 Nodes
+Description=Xray Reality Service
 After=network.target
 
 [Service]
@@ -226,7 +209,7 @@ systemctl daemon-reload
 systemctl enable --now xray
 
 echo -e "\n${GREEN}============================================${NC}"
-echo -e "${GREEN}✔ 10个节点部署成功！旧配置已清除。${NC}"
-echo -e "${YELLOW}⚠️  必须删除客户端旧节点，复制下方新链接导入！${NC}"
+echo -e "${GREEN}✔ 部署成功！已启用 XTLS-Vision 流控。${NC}"
+echo -e "${YELLOW}⚠️  请复制下方链接导入客户端 (支持 v2rayNG, Shadowrocket 等)${NC}"
 echo -e "${GREEN}============================================${NC}"
 echo -e "${BLUE}$ALL_LINKS${NC}"
