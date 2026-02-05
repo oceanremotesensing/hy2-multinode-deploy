@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# reality-10-nodes-fixed.sh
-# 10节点版本 · 复用现有核心 · 显式密钥调试
+# reality-10-nodes-fixed-v2.sh
+# 修复版：自动架构检测 + 稳健的密钥生成 + 依赖修复
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -29,7 +29,15 @@ USED_PORTS=()
 [ "$(id -u)" -ne 0 ] && echo -e "${RED}❌ 请用 root 运行${NC}" && exit 1
 
 # ==========================================
-# 1. 环境清理 (只清理配置，不删核心)
+# 0. 基础依赖检查与安装
+# ==========================================
+echo -e "${BLUE}▶ 正在检查系统依赖...${NC}"
+apt update -y >/dev/null 2>&1
+# 必须安装 uuid-runtime 用于生成 UUID，openssl 用于生成 sid
+apt install -y curl wget unzip jq uuid-runtime openssl >/dev/null 2>&1
+
+# ==========================================
+# 1. 环境清理
 # ==========================================
 echo -e "${YELLOW}🔥 正在清理旧配置...${NC}"
 systemctl stop xray >/dev/null 2>&1
@@ -38,37 +46,70 @@ rm -f /etc/systemd/system/xray.service
 mkdir -p "$XRAY_DIR"
 
 # ==========================================
-# 2. 核心检测 (复用你已有的成功核心)
+# 2. 核心检测与安装 (自动架构适配)
 # ==========================================
 echo -e "${BLUE}▶ 检测 Xray 核心状态...${NC}"
 
-# 重新安装 unzip 确保万无一失
-apt update -y >/dev/null 2>&1
-apt install -y unzip curl >/dev/null 2>&1
+install_xray() {
+    echo -e "${YELLOW}⬇️ 正在下载 Xray Core...${NC}"
+    
+    # 检测架构
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64)
+            FILE_ARCH="64"
+            ;;
+        aarch64|arm64)
+            FILE_ARCH="arm64-v8a"
+            ;;
+        *)
+            echo -e "${RED}❌ 不支持的架构: $ARCH${NC}"
+            exit 1
+            ;;
+    esac
+
+    # 创建临时目录
+    mkdir -p /tmp/xray_install
+    cd /tmp/xray_install || exit 1
+
+    # 下载
+    DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${FILE_ARCH}.zip"
+    curl -L -o xray.zip "$DOWNLOAD_URL"
+
+    # 解压并安装
+    if unzip -o xray.zip >/dev/null; then
+        install -m 755 xray "$XRAY_BIN"
+        echo -e "${GREEN}✔ Xray 安装成功 (架构: $FILE_ARCH)${NC}"
+    else
+        echo -e "${RED}❌ 解压失败，下载文件可能损坏${NC}"
+        cd ~
+        rm -rf /tmp/xray_install
+        exit 1
+    fi
+
+    # 清理
+    cd ~
+    rm -rf /tmp/xray_install
+}
 
 # 检查当前核心能否运行
 if [ -f "$XRAY_BIN" ] && "$XRAY_BIN" version >/dev/null 2>&1; then
-    echo -e "${GREEN}✔ 检测到现有 Xray 核心正常，跳过下载步骤。${NC}"
+    echo -e "${GREEN}✔ 检测到现有 Xray 核心正常，跳过下载。${NC}"
 else
-    echo -e "${RED}❌ 核心文件不存在或损坏，正在强制重新安装...${NC}"
-    curl -L -o xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-    unzip -o xray.zip >/dev/null
-    install -m 755 xray "$XRAY_BIN"
-    rm -f xray.zip xray
-    
+    install_xray
     # 再次检查
     if ! "$XRAY_BIN" version >/dev/null 2>&1; then
-        echo -e "${RED}❌ 严重错误：重新下载后依然无法运行 Xray。${NC}"
+        echo -e "${RED}❌ 严重错误：新安装的核心无法运行，请检查系统兼容性。${NC}"
         exit 1
     fi
 fi
 
 # ==========================================
-# 3. 密钥生成 (调试模式)
+# 3. 密钥生成 (修复正则匹配)
 # ==========================================
 echo -e "${BLUE}▶ 正在生成密钥对...${NC}"
 
-# 直接将输出存入变量
+# 运行命令获取输出
 KEY_OUTPUT=$("$XRAY_BIN" x25519)
 
 if [ -z "$KEY_OUTPUT" ]; then
@@ -76,24 +117,21 @@ if [ -z "$KEY_OUTPUT" ]; then
     exit 1
 fi
 
-# 打印调试信息
-echo -e "${YELLOW}--- 调试信息：生成的密钥 ---${NC}"
-echo "$KEY_OUTPUT"
-echo -e "${YELLOW}----------------------------${NC}"
-
-# 写入文件
+# 写入文件留底
 echo "$KEY_OUTPUT" > "$KEY_FILE"
 
-# 提取
-PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -i "Private key" | awk '{print $NF}' | tr -d '\r')
-PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -i "Public key" | awk '{print $NF}' | tr -d '\r')
+# 修复后的提取逻辑：使用 awk -F': ' 更加精准
+PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep "Private key" | awk -F': ' '{print $2}' | tr -d ' \r\n')
+PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep "Public key" | awk -F': ' '{print $2}' | tr -d ' \r\n')
 
-if [[ ${#PUBLIC_KEY} -lt 40 ]]; then
-    echo -e "${RED}❌ 提取公钥失败。请检查上方调试信息。${NC}"
+# 调试检查
+if [[ ${#PRIVATE_KEY} -lt 40 || ${#PUBLIC_KEY} -lt 40 ]]; then
+    echo -e "${RED}❌ 密钥提取失败。${NC}"
+    echo -e "原始输出:\n$KEY_OUTPUT"
     exit 1
 fi
 
-echo -e "${GREEN}✔ 密钥提取成功！${NC}"
+echo -e "${GREEN}✔ 密钥生成完毕!${NC}"
 
 # ==========================================
 # 4. 生成 10 个节点配置
@@ -102,12 +140,13 @@ PUBLIC_IP=$(curl -s4 https://api.ipify.org || curl -s4 ip.sb)
 INBOUNDS_JSON=""
 ALL_LINKS=""
 COUNT=0
-NODE_NUM=10  # 这里设定为10个
+NODE_NUM=10 
 
 get_random_port() {
   while true; do
     PORT=$((RANDOM % (PORT_MAX - PORT_MIN + 1) + PORT_MIN))
-    if ss -lnt | grep -q ":$PORT$"; then continue; fi
+    # 检查端口占用
+    if ss -lnt | grep -q ":$PORT "; then continue; fi
     echo "$PORT"; return
   done
 }
@@ -120,7 +159,10 @@ while [ $COUNT -lt $NODE_NUM ]; do
   SID=$(openssl rand -hex 4)
   SERVER_NAME=${SERVER_NAMES[$RANDOM % ${#SERVER_NAMES[@]}]}
 
-  ufw allow "$PORT"/tcp >/dev/null 2>&1
+  # 尝试开放防火墙 (兼容 ufw)
+  if command -v ufw >/dev/null 2>&1; then
+      ufw allow "$PORT"/tcp >/dev/null 2>&1
+  fi
 
   NODE_JSON=$(cat <<EOF
 {
@@ -147,12 +189,14 @@ EOF
   [ $COUNT -gt 0 ] && INBOUNDS_JSON+=","
   INBOUNDS_JSON+="$NODE_JSON"
 
+  # 链接生成
   LINK="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&security=reality&type=tcp&sni=${SERVER_NAME}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SID}#Reality-${PORT}"
   ALL_LINKS+="${LINK}\n"
   
   COUNT=$((COUNT + 1))
 done
 
+# 写入配置文件
 cat > "$CONF" <<EOF
 {
   "log": { "loglevel": "warning" },
