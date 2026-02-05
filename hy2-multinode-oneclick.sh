@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Xray-Reality-Auto-Deploy.sh
-# 适配 Debian/Ubuntu/CentOS
-# 功能：自动部署 Xray Reality + Vision 流控 + 随机端口
+# Xray-Reality-Clean-And-Deploy.sh
+# 作用：1. 强力清除系统中残留的 VPN 内核 (Xray/V2Ray/Hysteria)
+#      2. 在干净环境下全新安装 Xray Reality
 
 # 颜色定义
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -9,125 +9,129 @@ XRAY_BIN="/usr/local/bin/xray"
 CONF_DIR="/etc/xray"
 CONF_FILE="${CONF_DIR}/config.json"
 
-# 1. 权限检查
-[ "$(id -u)" -ne 0 ] && echo -e "${RED}❌ 必须使用 root 权限运行此脚本！${NC}" && exit 1
+[ "$(id -u)" -ne 0 ] && echo -e "${RED}❌ 必须使用 root 权限运行！${NC}" && exit 1
 
-echo -e "${BLUE}▶ 正在初始化安装环境...${NC}"
+# ==========================================
+# 第一步：彻底清理旧环境 (The Cleaner)
+# ==========================================
+echo -e "${YELLOW}🧹 [1/4] 正在执行深度清理...${NC}"
 
-# 2. 强制时间同步 (防止 Reality 连接失败)
+# 1. 停止并禁用常见的 VPN 服务
+SERVICES=("xray" "v2ray" "v2ray-server" "hysteria" "hysteria-server" "hy2" "tuic")
+for SERVICE in "${SERVICES[@]}"; do
+    if systemctl is-active --quiet "$SERVICE" || systemctl is-enabled --quiet "$SERVICE"; then
+        echo -e "   - 停止服务: $SERVICE"
+        systemctl stop "$SERVICE" >/dev/null 2>&1
+        systemctl disable "$SERVICE" >/dev/null 2>&1
+    fi
+    # 删除服务文件
+    rm -f "/etc/systemd/system/${SERVICE}.service"
+    rm -f "/lib/systemd/system/${SERVICE}.service"
+done
+
+# 2. 删除残留的二进制文件
+echo -e "   - 删除残留二进制文件..."
+rm -rf /usr/local/bin/xray
+rm -rf /usr/bin/xray
+rm -rf /usr/local/bin/v2ray
+rm -rf /usr/bin/v2ray
+rm -rf /usr/local/bin/hysteria
+rm -rf /root/hy2  # 之前 Hysteria 脚本常见的安装位置
+
+# 3. 删除旧的配置文件目录
+echo -e "   - 删除旧配置目录..."
+rm -rf /etc/xray
+rm -rf /usr/local/etc/xray
+rm -rf /etc/v2ray
+rm -rf /etc/hysteria
+
+# 4. 刷新系统服务列表
+systemctl daemon-reload
+echo -e "${GREEN}✔ 清理完成！环境已重置。${NC}"
+
+# ==========================================
+# 第二步：准备新环境
+# ==========================================
+echo -e "${BLUE}🔨 [2/4] 正在准备新环境...${NC}"
+
+# 时间同步 (Reality 强依赖时间)
 if command -v date >/dev/null 2>&1; then
-    # 尝试同步时间
-    systemctl stop xray >/dev/null 2>&1
     date -s "$(curl -sI https://www.google.com | grep ^Date: | sed 's/Date: //g')" >/dev/null 2>&1
-    echo -e "${GREEN}✔ 服务器时间已同步: $(date)${NC}"
+    echo -e "   - 时间已同步: $(date)"
 fi
 
-# 3. 依赖安装 (自动识别系统)
-echo -e "${BLUE}▶ 正在检查并安装依赖...${NC}"
+# 安装依赖
 if command -v apt >/dev/null 2>&1; then
     apt update -y >/dev/null 2>&1
     apt install -y curl wget unzip jq uuid-runtime openssl coreutils >/dev/null 2>&1
 elif command -v yum >/dev/null 2>&1; then
     yum install -y curl wget unzip jq util-linux openssl coreutils >/dev/null 2>&1
-elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl wget unzip jq util-linux openssl coreutils >/dev/null 2>&1
-else
-    echo -e "${RED}❌ 未知系统，无法自动安装依赖，请手动安装 curl/unzip/openssl${NC}"
+fi
+
+# ==========================================
+# 第三步：安装 Xray 核心
+# ==========================================
+echo -e "${BLUE}⬇️ [3/4] 正在安装最新版 Xray...${NC}"
+
+ARCH=$(uname -m)
+case $ARCH in
+    x86_64) FILE_ARCH="64" ;;
+    aarch64|arm64) FILE_ARCH="arm64-v8a" ;;
+    *) echo -e "${RED}❌ 不支持的架构: $ARCH${NC}"; exit 1 ;;
+esac
+
+# 下载并安装
+curl -L -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${FILE_ARCH}.zip"
+unzip -o /tmp/xray.zip -d /tmp/xray_dist >/dev/null
+install -m 755 /tmp/xray_dist/xray "$XRAY_BIN"
+rm -rf /tmp/xray.zip /tmp/xray_dist
+
+# 验证安装
+if ! "$XRAY_BIN" version >/dev/null 2>&1; then
+    echo -e "${RED}❌ Xray 安装失败，无法运行。${NC}"
     exit 1
 fi
+echo -e "${GREEN}✔ Xray 安装成功!${NC}"
 
-# 4. 安装/更新 Xray 核心
-install_xray() {
-    echo -e "${YELLOW}⬇️ 正在下载最新版 Xray 核心...${NC}"
-    rm -rf "$XRAY_BIN" # 强制删除旧文件，避免版本冲突
-    
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64) FILE_ARCH="64" ;;
-        aarch64|arm64) FILE_ARCH="arm64-v8a" ;;
-        *) echo -e "${RED}❌ 不支持的架构: $ARCH${NC}"; exit 1 ;;
-    esac
+# ==========================================
+# 第四步：生成配置 & 启动
+# ==========================================
+echo -e "${BLUE}🔑 [4/4] 生成密钥与配置...${NC}"
 
-    # 创建临时目录下载
-    mkdir -p /tmp/xray_dl
-    cd /tmp/xray_dl || exit 1
-    
-    curl -L -o xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${FILE_ARCH}.zip"
-    
-    if ! unzip -o xray.zip >/dev/null; then
-        echo -e "${RED}❌ 解压失败，下载文件可能损坏${NC}"
-        cd ~ && rm -rf /tmp/xray_dl
-        exit 1
-    fi
-    
-    install -m 755 xray "$XRAY_BIN"
-    cd ~ && rm -rf /tmp/xray_dl
-    
-    # 验证安装
-    if ! "$XRAY_BIN" version >/dev/null 2>&1; then
-        echo -e "${RED}❌ Xray 安装后无法运行，请检查系统兼容性${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}✔ Xray 核心安装成功${NC}"
-}
-
-# 如果没有安装或者无法运行，则重新安装
-if [ ! -f "$XRAY_BIN" ] || ! "$XRAY_BIN" version >/dev/null 2>&1; then
-    install_xray
-else
-    echo -e "${GREEN}✔ 检测到 Xray 已安装，跳过下载${NC}"
-fi
-
-# 5. 生成密钥 (关键修复：使用 awk 稳健提取)
-echo -e "${BLUE}▶ 正在生成 Reality 密钥对...${NC}"
+# 生成密钥 (使用稳健提取法)
 KEY_OUTPUT=$("$XRAY_BIN" x25519)
-
-# 使用 awk '{print $NF}' 提取每行的最后一项，无视中间的空格
 PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep "Private key" | awk '{print $NF}' | tr -d ' \r\n')
 PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep "Public key" | awk '{print $NF}' | tr -d ' \r\n')
 
-# 校验密钥有效性
+# 再次检查密钥
 if [[ ${#PRIVATE_KEY} -lt 40 ]]; then
-    echo -e "${RED}❌ 密钥提取失败，尝试重新安装核心...${NC}"
-    install_xray
-    KEY_OUTPUT=$("$XRAY_BIN" x25519)
-    PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep "Private key" | awk '{print $NF}' | tr -d ' \r\n')
-    PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep "Public key" | awk '{print $NF}' | tr -d ' \r\n')
-    
-    if [[ ${#PRIVATE_KEY} -lt 40 ]]; then
-        echo -e "${RED}❌ 致命错误：无法生成有效的 Xray 密钥。${NC}"
-        exit 1
-    fi
+    echo -e "${RED}❌ 密钥生成异常。输出内容：${NC}"
+    echo "$KEY_OUTPUT"
+    exit 1
 fi
-echo -e "${GREEN}✔ 密钥生成完毕${NC}"
 
-# 6. 生成配置参数
+# 准备参数
 UUID=$(uuidgen)
-# 使用 shuf 生成真正的随机端口 (20000-59999)
 PORT=$(shuf -i 20000-59999 -n 1)
 SID=$(openssl rand -hex 4)
 MY_IP=$(curl -s4 https://api.ipify.org || curl -s4 ip.sb)
-SERVER_NAME="www.microsoft.com"
 
-# 7. 写入配置文件 (开启 Vision 流控)
+# 写入配置
 mkdir -p "$CONF_DIR"
 cat > "$CONF_FILE" <<EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [{
-    "listen": "0.0.0.0",
-    "port": $PORT,
-    "protocol": "vless",
+    "listen": "0.0.0.0", "port": $PORT, "protocol": "vless",
     "settings": {
       "clients": [{ "id": "$UUID", "flow": "xtls-rprx-vision" }],
       "decryption": "none"
     },
     "streamSettings": {
-      "network": "tcp",
-      "security": "reality",
+      "network": "tcp", "security": "reality",
       "realitySettings": {
-        "dest": "${SERVER_NAME}:443",
-        "serverNames": ["${SERVER_NAME}"],
+        "dest": "www.microsoft.com:443",
+        "serverNames": ["www.microsoft.com"],
         "privateKey": "$PRIVATE_KEY",
         "shortIds": ["$SID"]
       }
@@ -137,44 +141,30 @@ cat > "$CONF_FILE" <<EOF
 }
 EOF
 
-# 8. 配置防火墙 (如果有)
-if command -v ufw >/dev/null 2>&1; then
-    ufw allow "$PORT"/tcp >/dev/null 2>&1
-elif command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --zone=public --add-port="$PORT"/tcp --permanent >/dev/null 2>&1
-    firewall-cmd --reload >/dev/null 2>&1
-fi
-
-# 9. 创建并启动服务
+# 写入服务文件
 cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
-Description=Xray Reality Service
+Description=Xray Reality
 After=network.target
-
 [Service]
 ExecStart=$XRAY_BIN run -c $CONF_FILE
 Restart=always
 LimitNOFILE=65535
-
 [Install]
 WantedBy=multi-user.target
 EOF
 
+# 启动
 systemctl daemon-reload
 systemctl enable --now xray
 
-# 10. 输出客户端链接
-LINK="vless://${UUID}@${MY_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&type=tcp&sni=${SERVER_NAME}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SID}#Reality-Vision-${PORT}"
+# 生成链接
+LINK="vless://${UUID}@${MY_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&type=tcp&sni=www.microsoft.com&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SID}#Reality-Clean-${PORT}"
 
-echo -e "\n${GREEN}============================================${NC}"
-echo -e "${GREEN}✔ 部署成功！脚本已修复完毕。${NC}"
-echo -e "${GREEN}============================================${NC}"
-echo -e "地址 (IP): ${MY_IP}"
-echo -e "端口 (Port): ${PORT}"
-echo -e "用户ID (UUID): ${UUID}"
-echo -e "流控 (Flow): xtls-rprx-vision"
-echo -e "公钥 (PublicKey): ${PUBLIC_KEY}"
-echo -e "${GREEN}============================================${NC}"
-echo -e "${BLUE}请复制下方链接导入客户端 (v2rayNG / Shadowrocket / Nekobox)${NC}"
+echo -e "\n${GREEN}==============================================${NC}"
+echo -e "${GREEN}✔ 清理并重装完成！${NC}"
+echo -e "${GREEN}==============================================${NC}"
+echo -e "端口: $PORT"
+echo -e "密钥: $PRIVATE_KEY"
+echo -e "${BLUE}复制下方链接到客户端：${NC}"
 echo -e "\n${LINK}\n"
-echo -e "${GREEN}============================================${NC}"
