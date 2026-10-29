@@ -1,0 +1,7 @@
+{
+  "name": "pxxl-node",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "bash /xray/entrypoint.sh"
+  }
+}
