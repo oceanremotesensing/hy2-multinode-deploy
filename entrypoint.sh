@@ -1,12 +1,11 @@
 #!/bin/bash
 
-# 优先使用平台注入的 PORT，没有则默认 3000
 PORT=${PORT:-3000}
 UUID=${UUID:-b7c8e9f0-2a3b-4c5d-8e9f-0a1b2c3d4e5f}
 WSPATH=${WSPATH:-/vl}
 
-# 动态生成 Xray 配置文件
-cat <<EOF > /xray/config.json
+# 写入到所有人都有读写权限的 /tmp 目录
+cat <<EOF > /tmp/config.json
 {
   "log": {
     "loglevel": "warning"
@@ -41,4 +40,5 @@ cat <<EOF > /xray/config.json
 EOF
 
 echo "Starting Xray on port $PORT with UUID $UUID and path $WSPATH..."
-exec /xray/xray -config /xray/config.json
+# 从 /tmp/config.json 读取配置启动
+exec /xray/xray -config /tmp/config.json
