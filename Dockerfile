@@ -17,8 +17,8 @@ RUN ARCH=$(uname -m) && \
     chmod +x xray && \
     rm -f xray.zip
 
-# 拷贝启动脚本
+# 拷贝启动脚本并给整个目录开放完全权限
 COPY entrypoint.sh /xray/entrypoint.sh
-RUN chmod +x /xray/entrypoint.sh
+RUN chmod -R 777 /xray
 
 CMD ["/xray/entrypoint.sh"]
